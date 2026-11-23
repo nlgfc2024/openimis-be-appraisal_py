@@ -1,14 +1,15 @@
 """Shape of the appraisal module configuration. Every problem is reported with its path, e.g.
-``programmes.UMEP.eligibility[2].key``. Strategy names are checked by the pre-fill rules and score rules
-by the scoring, each in its own work package; here only their shape."""
+``programmes.UMEP.eligibility[2].key``. Strategy and check names must exist; score rules are checked for
+shape (their points by the scoring)."""
 import re
 
 from django.core.exceptions import ValidationError
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 PERMS_SUFFIX = "_perms"
-PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "scoring", "shortlist"}
-ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "params"}
+PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs", "scoring", "shortlist"}
+ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "location_type"}
+LOCATION_TYPES = ("R", "D", "W", "V")
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
 SHORTLIST_KEYS = {"size", "per_city"}
@@ -56,16 +57,50 @@ def _keyed_items(errors, items, path, check):
 
 
 def _eligibility_item(errors, item, path):
+    from calcrule_validations.strategies import ValidationStrategyStorage
+
+    from appraisal.checks import CHECKS
+
     _unexpected(errors, item, ELIGIBILITY_KEYS, path)
-    strategy = item.get("strategy")
+    strategy, check = item.get("strategy"), item.get("check")
     if strategy is not None and not _is_text(strategy):
         errors.append(f"{path}.strategy must be a strategy name, or null for an item only an officer judges.")
+    elif strategy and ValidationStrategyStorage.choose_strategy(strategy) is None:
+        errors.append(f"{path}.strategy '{strategy}' is not a calcrule_validations strategy.")
+    if check is not None and check not in CHECKS:
+        errors.append(f"{path}.check must be one of: {', '.join(sorted(CHECKS))}.")
+    if strategy and check:
+        errors.append(f"{path} has both a strategy and a check; use one.")
+    if "location_type" in item and item["location_type"] not in LOCATION_TYPES:
+        errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
     if "field" in item and not _is_text(item["field"]):
         errors.append(f"{path}.field must be a non-empty string.")
     if strategy is not None and "field" not in item:
         errors.append(f"{path}.field is required when a strategy pre-fills the item.")
     if "params" in item and not isinstance(item["params"], dict):
         errors.append(f"{path}.params must be an object.")
+
+
+def _inputs(errors, inputs, path):
+    from appraisal.prefill import DERIVATIONS
+
+    if not isinstance(inputs, dict):
+        errors.append(f"{path} must be an object of input name: how it is derived.")
+        return
+    for name, spec in inputs.items():
+        spec_path = f"{path}.{name}"
+        if not isinstance(spec, dict) or spec.get("derive") not in DERIVATIONS:
+            errors.append(f"{spec_path}.derive must be one of: {', '.join(sorted(DERIVATIONS))}.")
+            continue
+        needed = DERIVATIONS[spec["derive"]][1]
+        _unexpected(errors, spec, {"derive", *needed}, spec_path)
+        for key in needed:
+            value = spec.get(key)
+            text = _is_text(value) if key == "field" else (
+                isinstance(value, list) and bool(value) and all(_is_text(v) for v in value))
+            if not text:
+                expected = "a question name" if key == "field" else "a non-empty list of names"
+                errors.append(f"{spec_path}.{key} must be {expected}.")
 
 
 def _score_component(errors, item, path):
@@ -126,6 +161,8 @@ def _programme(errors, code, programme, path):
     if "description" in programme and not isinstance(programme["description"], str):
         errors.append(f"{path}.description must be a string.")
     _keyed_items(errors, programme.get("eligibility", []), f"{path}.eligibility", _eligibility_item)
+    if "inputs" in programme:
+        _inputs(errors, programme["inputs"], f"{path}.inputs")
     if "scoring" in programme:
         _scoring(errors, programme["scoring"], f"{path}.scoring")
     if "shortlist" in programme:

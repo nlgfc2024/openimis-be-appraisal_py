@@ -22,6 +22,7 @@ setup(
         'openimis-be-core',
         'openimis-be-individual',
         'openimis-be-msr_etl',
+        'openimis-be-calcrule_validations',
     ],
     classifiers=[
         'Environment :: Web Environment',

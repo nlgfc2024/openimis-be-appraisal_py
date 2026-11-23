@@ -6,7 +6,7 @@ checklist, score rules and shortlist come from configuration. Urban MEP (UMEP) i
 applications imported from Kobo by `msr_etl` (Urban MEP Operations Manual, chapter 8 and Annex 2A/2B).
 
 Built in work packages tracked in [#1](https://github.com/nlgfc2024/openimis-be-appraisal_py/issues/1). This
-version holds the configuration, its validation, the rights and the data model.
+version holds the configuration, the rights, the data model and the pre-fill from imported applications.
 
 ## Installation
 
@@ -53,12 +53,12 @@ configuration is checked when it is saved and again at start; every problem is r
 | --- | --- |
 | `source_types` | msr_etl sources whose applications this programme appraises. |
 | `round` | The intake round; one appraisal per person, programme and round. |
-| `eligibility` | The prerequisite checklist. Each item has a unique `key` and a `label`; `strategy` names the calcrule_validations strategy that pre-fills it from `field` (with `params`), or `null` for an item only an officer judges. |
+| `eligibility` | The prerequisite checklist. Each item has a unique `key` and a `label`, and either a `strategy` (a calcrule_validations strategy run on `field`, with `params` and optional `location_type`), a `check` (`youth_ownership`, `co_financing`, with `params`), or neither for an item only an officer judges. See "Pre-fill from the application". |
+| `inputs` | Score inputs derived from answers and documents (`months_since`, `all_answered`, `document_stored`). |
 | `scoring` | Score components: `key`, `label`, `field`, `weight` and `scoring` in enrolment's weighted-score shape (`mapping` or `numeric_bands`); the total is normalised to `normalise_to` (default 100). |
 | `shortlist` | Places: `size` overall, and/or `per_city` places by city. |
 
-Strategy names and score rules are checked in full by the pre-fill and scoring work packages; this version
-checks their shape.
+Strategy and check names must exist; score rules are checked for shape here and in full by the scoring.
 
 ## Data model
 
@@ -74,6 +74,51 @@ Manual 8.11), and are soft-deleted (`is_deleted`).
 - **Which value counts.** `AppraisalItem.result` and `.points` give the officer's value when one is recorded, else the system's; `is_overridden` says which. `basis_changed` flags that the answers changed after an officer recorded a value.
 - **Enforced in the database.** An item holds only the value of its kind; points and scores are never negative; ranks start at 1; an officer's value always has `decided_by` and `decided_at`.
 - **Access.** `Appraisal.get_queryset(queryset, user)` and `AppraisalItem.get_queryset` follow `Individual.get_queryset`: a user sees the appraisals of the individuals in their locations.
+
+## Pre-fill from the application
+
+An application imported or updated by msr_etl (`kobo_submission_applied`) gets an appraisal for each programme
+that reads its source, with one `ELIGIBILITY` item per checklist rule, proposed from its answers:
+
+- **`strategy`**: a calcrule_validations strategy run on the answer to `field`, with `params` and the submission
+  date as `reference_date` (ages, expiry dates). Success gives `YES`, failure `NO`; the basis keeps the answer and
+  the strategy's note. With `location_type`, a location code is first followed to its current code
+  (msr_etl `current_location_code`), so an answer given with a since-replaced temporary code still matches.
+- **`check`**: a built-in check reading an uploaded template; the template is the applicant's word, so the result
+  stays `PENDING` with the proposal (`proposed`: `YES`/`NO`) and the figures in the basis.
+  - `youth_ownership`: a sole proprietor aged `min_age`-`max_age` (default 18-35) is `YES`, otherwise `NO`; a
+    partnership or company is proposed `YES` when owners of that age hold more than `min_share`% (default 80) in
+    the ownership template (`Age`, `Ownership %` columns).
+  - `co_financing`: proposed `YES` when the applicant contributes at least `min_share`% (default 30) of the
+    applicant and project contributions in the grant request template.
+  - Parameters: `template`, `columns`, the answer names (`legal_form_field`, `dob_field`, `sole_forms`,
+    `sources_field`) and the thresholds; defaults follow the Urban MEP form and templates.
+- **neither**: `PENDING` for the officer.
+
+A missing answer, or a template that is missing, still downloading or unreadable, is `PENDING` with the reason,
+never `NO`.
+
+**Score inputs.** The value of every score component's `field` is stored in `json_ext.score_inputs`: the answer,
+or a value the programme's `inputs` derive:
+
+```json
+"inputs": {
+  "months_in_operation": {"derive": "months_since", "field": "business_start_date"},
+  "has_business_bank_account": {"derive": "all_answered", "fields": ["business_account_name", "business_bank", "business_account_number"]},
+  "has_bank_statement": {"derive": "document_stored", "document_types": ["bank_statement_3m"]}
+}
+```
+
+`months_since` counts whole months to the submission date; `all_answered` is true when every question is
+answered; `document_stored` is true once a document is stored, unknown (null) while one is downloading.
+
+**Refreshing.** A repeat application, or a document stored later (`applicant_document_stored`), refreshes the
+system's values under the rules in force when the appraisal was created (`config_snapshot`). An officer's answer
+is never changed; an item whose basis changed after an officer answered it is flagged `basis_changed`. Nothing is
+written when nothing changed. An older application never replaces a newer one.
+
+**Backfill.** `manage.py appraisal_backfill [--programme UMEP] [--dry-run]` appraises applications imported before
+the module or a programme was configured, from each person's latest application. It is safe to run again.
 
 ## Rights
 

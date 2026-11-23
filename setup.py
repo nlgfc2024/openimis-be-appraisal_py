@@ -21,6 +21,7 @@ setup(
         'django',
         'openimis-be-core',
         'openimis-be-individual',
+        'openimis-be-msr_etl',
     ],
     classifiers=[
         'Environment :: Web Environment',

@@ -71,6 +71,9 @@ class AppraisalConfig(AppConfig):
         cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
         self._load_config(cfg)
         register_validator(self.name, self._validate_module_config)
+        from appraisal import receivers
+
+        receivers.connect()
 
     def _validate_module_config(self, instance):
         """Reject an invalid configuration on save, before the next restart reads it."""

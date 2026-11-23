@@ -1,0 +1,90 @@
+import logging
+
+from django.apps import AppConfig
+from django.core.exceptions import ValidationError
+
+from core.module_config_registry import register_validator
+
+logger = logging.getLogger(__name__)
+
+MODULE_NAME = "appraisal"
+
+# One right per role action of the desk appraisal (Urban MEP Operations Manual 8.9). The 220000 block is
+# reserved for this module; tests fail if another installed module defaults to one of these codes.
+RIGHT_APPRAISAL_VIEW = 220001
+RIGHT_APPRAISAL_SCREEN = 220002
+RIGHT_APPRAISAL_SCORE = 220003
+RIGHT_APPRAISAL_SHORTLIST = 220004
+RIGHT_APPRAISAL_REVIEW_DOCUMENTS = 220005
+RIGHT_APPRAISAL_RETURN = 220006
+RIGHT_APPRAISAL_APPROVE = 220007
+
+APPRAISAL_RIGHTS = (
+    RIGHT_APPRAISAL_VIEW,
+    RIGHT_APPRAISAL_SCREEN,
+    RIGHT_APPRAISAL_SCORE,
+    RIGHT_APPRAISAL_SHORTLIST,
+    RIGHT_APPRAISAL_REVIEW_DOCUMENTS,
+    RIGHT_APPRAISAL_RETURN,
+    RIGHT_APPRAISAL_APPROVE,
+)
+
+DEFAULT_CONFIG = {
+    "gql_query_appraisal_perms": [str(RIGHT_APPRAISAL_VIEW)],
+    "gql_mutation_screen_appraisal_perms": [str(RIGHT_APPRAISAL_SCREEN)],
+    "gql_mutation_score_appraisal_perms": [str(RIGHT_APPRAISAL_SCORE)],
+    "gql_mutation_shortlist_appraisal_perms": [str(RIGHT_APPRAISAL_SHORTLIST)],
+    "gql_mutation_review_document_perms": [str(RIGHT_APPRAISAL_REVIEW_DOCUMENTS)],
+    "gql_mutation_return_appraisal_perms": [str(RIGHT_APPRAISAL_RETURN)],
+    "gql_mutation_approve_appraisal_perms": [str(RIGHT_APPRAISAL_APPROVE)],
+    # Programmes appraised, keyed by programme code; none by default. See README "Configuration" and
+    # appraisal.config.validate_programmes for the shape.
+    "programmes": {},
+}
+
+
+class AppraisalConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = MODULE_NAME
+
+    gql_query_appraisal_perms = None
+    gql_mutation_screen_appraisal_perms = None
+    gql_mutation_score_appraisal_perms = None
+    gql_mutation_shortlist_appraisal_perms = None
+    gql_mutation_review_document_perms = None
+    gql_mutation_return_appraisal_perms = None
+    gql_mutation_approve_appraisal_perms = None
+    programmes = None
+
+    @classmethod
+    def _load_config(cls, cfg):
+        from appraisal.config import validate_config
+
+        validate_config(cfg)
+        for field in cfg:
+            if hasattr(cls, field):
+                setattr(cls, field, cfg[field])
+
+    def ready(self):
+        from core.models import ModuleConfiguration
+
+        cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
+        self._load_config(cfg)
+        register_validator(self.name, self._validate_module_config)
+
+    def _validate_module_config(self, instance):
+        """Reject an invalid configuration on save, before the next restart reads it."""
+        from appraisal.config import validate_config
+
+        saved = instance._cfg
+        if not isinstance(saved, dict):
+            raise ValidationError({"config": "Module configuration must be an object."})
+        try:
+            validate_config({**DEFAULT_CONFIG, **saved})
+        except ValidationError as exc:
+            raise ValidationError({"config": exc.messages}) from exc
+
+    @classmethod
+    def programme(cls, code):
+        """The configuration of programme ``code``, or None when it isn't appraised."""
+        return (cls.programmes or {}).get(code)

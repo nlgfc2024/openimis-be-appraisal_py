@@ -178,3 +178,21 @@ class ResubmitAppraisalMutation(BaseMutation):
     @classmethod
     def _mutate(cls, user, **data):
         returns.resubmit_appraisal(user, data["id"], data.get("note", ""))
+
+
+class ReopenAppraisalMutation(BaseMutation):
+    """Reopen a decided screening to correct its eligibility decision, with the reason."""
+    _mutation_class = "ReopenAppraisalMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True, description="The appraisal")
+        reason = graphene.String(required=True, description="Why the decision is being corrected")
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_return_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        review.reopen_screening(user, data["id"], data["reason"])

@@ -18,8 +18,8 @@ from appraisal.gql_mutations import (
     ScoreAppraisalsMutation,
     ShortlistAppraisalsMutation,
 )
-from appraisal.gql_queries import AppraisalGQLType
-from appraisal.models import Appraisal
+from appraisal.gql_queries import AppraisalApprovalGQLType, AppraisalGQLType, AppraisalReportGQLType
+from appraisal.models import Appraisal, AppraisalApproval
 
 
 def _location_filter(parent_location, parent_location_level):
@@ -42,6 +42,15 @@ def _answer_filter(answers):
     return condition
 
 
+APPROVALS_LIMIT = 20
+
+
+def _require_view(user):
+    perms = AppraisalConfig.gql_query_appraisal_perms
+    if type(user) is AnonymousUser or not user.id or not perms or not user.has_perms(perms):
+        raise PermissionDenied(_("unauthorized"))
+
+
 class Query(graphene.ObjectType):
     appraisal = OrderedDjangoFilterConnectionField(
         AppraisalGQLType,
@@ -53,11 +62,36 @@ class Query(graphene.ObjectType):
         needs_review=graphene.Boolean(description="Only appraisals with an item whose basis changed"),
     )
 
+    appraisal_approvals = graphene.List(
+        AppraisalApprovalGQLType, programme=graphene.String(required=True), round=graphene.String(),
+        kind=graphene.String(), description="Approvals of a programme round, newest first",
+    )
+    appraisal_report = graphene.Field(
+        AppraisalReportGQLType, programme=graphene.String(required=True),
+        round=graphene.String(description="The latest round when not given"),
+    )
+
+    def resolve_appraisal_approvals(self, info, programme, round=None, kind=None):
+        user = info.context.user
+        _require_view(user)
+        approvals = AppraisalApproval.objects.filter(programme=programme, is_deleted=False)
+        if round:
+            approvals = approvals.filter(round=round)
+        if kind:
+            approvals = approvals.filter(kind=kind)
+        return AppraisalApproval.get_queryset(approvals, user).select_related("requested_by", "decided_by") \
+            .order_by("-requested_at")[:APPROVALS_LIMIT]
+
+    def resolve_appraisal_report(self, info, programme, round=None):
+        from appraisal.reports import appraisal_report
+
+        user = info.context.user
+        _require_view(user)
+        return appraisal_report(user, programme, round)
+
     def resolve_appraisal(self, info, **kwargs):
         user = info.context.user
-        perms = AppraisalConfig.gql_query_appraisal_perms
-        if type(user) is AnonymousUser or not user.id or not perms or not user.has_perms(perms):
-            raise PermissionDenied(_("unauthorized"))
+        _require_view(user)
         filters = [Q(is_deleted=False)]
         search = (kwargs.get("search") or "").strip()
         if search:

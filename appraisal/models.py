@@ -248,3 +248,66 @@ class AppraisalReturn(core_models.HistoryModel):
         if queryset is None:
             queryset = cls.objects.all()
         return queryset.filter(appraisal__in=Appraisal.get_queryset(None, user))
+
+
+class AppraisalApproval(core_models.HistoryModel):
+    """A change waiting for a supervisor (Operations Manual 8.12): a round's shortlist, or one appraisal's eligibility
+    decision when the programme requires approval. The change is kept in ``proposal`` and applied only when the task
+    in tasks_management is approved; a rejected or failed approval leaves the appraisals as they were."""
+    USE_CACHE = False
+
+    class Kind(models.TextChoices):
+        SHORTLIST = "SHORTLIST", _("Shortlist")
+        ELIGIBILITY = "ELIGIBILITY", _("Eligibility decision")
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", _("Awaiting approval")
+        APPROVED = "APPROVED", _("Approved")
+        REJECTED = "REJECTED", _("Rejected")
+        FAILED = "FAILED", _("Could not be applied")
+
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    programme = models.CharField(max_length=64)
+    round = models.CharField(max_length=64)
+    appraisal = models.ForeignKey(Appraisal, models.DO_NOTHING, null=True, blank=True, related_name="approvals")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    proposal = models.JSONField(default=dict)
+    summary = models.JSONField(default=dict, help_text="What the supervisor is shown")
+    task = models.ForeignKey("tasks_management.Task", models.DO_NOTHING, null=True, blank=True, related_name="+")
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, models.DO_NOTHING, related_name="+")
+    requested_at = models.DateTimeField()
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, models.DO_NOTHING, null=True, blank=True,
+                                   related_name="+")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    outcome = models.TextField(blank=True, default="", help_text="Why it could not be applied")
+
+    class Meta:
+        constraints = [
+            # One shortlist per round, and one decision per appraisal, awaiting approval at a time
+            models.UniqueConstraint(
+                fields=["kind", "programme", "round"],
+                condition=Q(is_deleted=False, status="PENDING", kind="SHORTLIST"),
+                name="appraisal_approval_one_pending_shortlist",
+            ),
+            models.UniqueConstraint(
+                fields=["appraisal"],
+                condition=Q(is_deleted=False, status="PENDING", kind="ELIGIBILITY"),
+                name="appraisal_approval_one_pending_decision",
+            ),
+        ]
+
+    def __str__(self):
+        # Shown as the task's entity in Tasks, e.g. "Shortlist UMEP 2026-R1"
+        subject = f"{self.programme} {self.round}"
+        if self.appraisal_id:
+            individual = self.appraisal.individual
+            subject = f"{individual.first_name} {individual.last_name}, {subject}"
+        return f"{self.get_kind_display()} {subject}"
+
+    @classmethod
+    def get_queryset(cls, queryset, user):
+        if queryset is None:
+            queryset = cls.objects.all()
+        # A shortlist covers the round: visible to anyone who may see appraisals
+        visible = Appraisal.get_queryset(None, user)
+        return queryset.filter(Q(appraisal__isnull=True) | Q(appraisal__in=visible))

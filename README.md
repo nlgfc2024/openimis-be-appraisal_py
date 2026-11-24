@@ -43,7 +43,9 @@ configuration is checked when it is saved and again at start; every problem is r
            "scoring": {"type": "numeric_bands", "bands": [{"min": 5000001, "points": 15}, {"min": 3000000, "points": 12}]}}
         ]
       },
-      "shortlist": {"size": 1200, "per_city": {"Blantyre": 526, "Zomba": 104, "Lilongwe": 401, "Mzuzu": 169}}
+      "shortlist": {"size": 1200, "per_city": {"Blantyre": 526, "Zomba": 104, "Lilongwe": 401, "Mzuzu": 169}},
+      "approval": {"shortlist": true, "eligibility": false},
+      "report": {"breakdowns": [{"key": "sector", "label": "Sector", "field": "primary_sector"}]}
     }
   }
 }
@@ -57,17 +59,21 @@ configuration is checked when it is saved and again at start; every problem is r
 | `inputs` | Score inputs derived from answers and documents (`months_since`, `all_answered`, `document_stored`). |
 | `scoring` | Score components: `key`, `label`, `field`, `weight` and `scoring` in enrolment's weighted-score shape (`mapping` or `numeric_bands`); the total is normalised to `normalise_to` (default 100). |
 | `shortlist` | Places: `size` overall, and/or `per_city` places by city. |
+| `documents` | The document check: `required` document types, optionally only `when` an answer is one of `in`. |
+| `approval` | `shortlist` and/or `eligibility`: `true` holds the shortlist / each eligibility decision for a supervisor's approval in tasks_management. |
+| `report` | `breakdowns`: application fields (`key`, `label`, `field`) the report counts appraisals by, e.g. the sector. |
 
 Strategy and check names must exist; score rules are checked for shape here and in full by the scoring.
 
 ## Data model
 
-Both models keep every change in a history table (`simple_history`) with the user and time (Operations
+Every model keeps every change in a history table (`simple_history`) with the user and time (Operations
 Manual 8.11), and are soft-deleted (`is_deleted`).
 
 | Model | Holds |
 | --- | --- |
 | `Appraisal` (`HistoryBusinessModel`) | One per person, `programme` and `round` (unique among active appraisals): the `submission` appraised (msr_etl `KoboSubmission`), `stage`, `status`, `eligibility`, `score`, `rank`, and `config_snapshot`, the programme's rules when it was created. |
+| `AppraisalApproval` (`HistoryModel`) | A shortlist (per round) or eligibility decision (per appraisal) held for approval: `kind`, `status` (`PENDING`, `APPROVED`, `REJECTED`, `FAILED` with the `outcome`), the change in `proposal`, the `summary` the supervisor sees, its tasks_management `task`, and who asked and decided when. One pending per round or appraisal. |
 | `AppraisalItem` (`HistoryModel`) | One per checklist item (`ELIGIBILITY`, a result: `YES` / `NO` / `PENDING`) or score component (`SCORE`, points), unique per appraisal, kind and `key`. The system's value with its `basis`, and the officer's value with `evidence`, `comment`, `decided_by` and `decided_at`. |
 
 - **Stage and status.** `stage` is where the application is: `DOCUMENT_CHECK`, `DESK_SCREENING`, `DESK_SCORING`, `SHORTLISTING`, `CLOSED`. `status` is its outcome so far: `RECEIVED`, `DOCUMENT_CHECK`, `DESK_SCREENING`, `ELIGIBLE`, `INELIGIBLE`, `SCORED`, `SHORTLISTED`, `NOT_SHORTLISTED`, `RETURNED` (8.13). A returned application keeps the stage it was returned from.
@@ -182,6 +188,28 @@ Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, st
   `json_ext.shortlist`. Running it again recomputes. It refuses while a score's basis changed unreviewed.
 - A programme without score components stops at eligibility.
 
+## Approval and reports
+
+**Supervisor approval** (Operations Manual 8.12), when the programme sets `approval`:
+
+- `shortlistAppraisals` ranks the round as usual but keeps the shortlist in an `AppraisalApproval` and opens a task
+  in tasks_management (source `appraisal`, business event `appraisal_shortlist`) instead of changing the
+  appraisals. A decision (`decideAppraisalEligibility`) is held the same way (`appraisal_eligibility`), and the
+  appraisal's checklist can't be answered or decided while it waits.
+- The task is approved or rejected in the Tasks screen by the task group handling source `appraisal`, under its
+  completion policy. The approver also needs `gql_mutation_approve_appraisal_perms`.
+- On approval the change is checked against the appraisals as they are now: the round must rank exactly as
+  proposed, the checklist must still lead to the same decision with the same answers. It is then applied, the log
+  naming who asked and who approved. Otherwise, or when rejected, nothing changes: the approval ends `FAILED` (with
+  the reason, e.g. `appraisal.shortlist_changed`) or `REJECTED`, and the officer runs it again.
+- One shortlist per round and one decision per appraisal wait at a time (`appraisal.approval_pending`).
+
+**Report** (`appraisalReport`), over the appraisals the user may see, for a programme's round (its latest by
+default): totals by status and stage; by city (the shortlist's location type) with places, eligible, ineligible,
+clarifications, scored and shortlisted; by each configured breakdown; the document check of the appraisals still
+being screened (incomplete, outstanding, to review, rejected); and what awaits action: not started, documents to
+review or missing, clarifications, answers changed, returned, and approvals pending.
+
 ## GraphQL API
 
 ```graphql
@@ -210,6 +238,9 @@ query {
   values that count; score items also give `maxPoints`. `documents` is the document check (`documentsComplete`),
   `returns` the returns for action. `history` lists the changes to the appraisal and its
   items (field, old, new), newest first.
+- `pendingApproval` and `approvals` give the appraisal's eligibility decisions held for approval;
+  `appraisalApprovals(programme, round, kind)` lists a round's approvals (the shortlist's among them), newest
+  first; `appraisalReport(programme, round)` is the report above. Both need `gql_query_appraisal_perms`.
 - The application's answers and documents are read with msr_etl's `koboApplications(individualId)` and
   `applicantDocuments(individualId)`, under msr_etl's own rights.
 
@@ -237,7 +268,7 @@ reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.
 | Shortlist | 220004 | `gql_mutation_shortlist_appraisal_perms` |
 | Review documents | 220005 | `gql_mutation_review_document_perms` |
 | Return for action | 220006 | `gql_mutation_return_appraisal_perms` |
-| Approve | 220007 | `gql_mutation_approve_appraisal_perms` |
+| Approve (a supervisor approving a held shortlist or decision in Tasks) | 220007 | `gql_mutation_approve_appraisal_perms` |
 
 The 220000 block is reserved for this module; a test fails if another installed module defaults to one of
 these codes. Rights are given to roles in the usual openIMIS role administration.

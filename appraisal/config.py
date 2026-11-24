@@ -7,7 +7,10 @@ from django.core.exceptions import ValidationError
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 PERMS_SUFFIX = "_perms"
-PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs", "scoring", "shortlist", "documents"}
+PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs", "scoring", "shortlist", "documents",
+                  "approval", "report"}
+APPROVAL_KEYS = {"shortlist", "eligibility"}
+BREAKDOWN_KEYS = {"key", "label", "field"}
 ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "location_type"}
 LOCATION_TYPES = ("R", "D", "W", "V")
 SCORING_KEYS = {"normalise_to", "components"}
@@ -180,6 +183,30 @@ def _shortlist(errors, shortlist, path):
                     errors.append(f"{path}.per_city['{city}'] must be a positive whole number of places.")
 
 
+def _approval(errors, approval, path):
+    if not isinstance(approval, dict):
+        errors.append(f"{path} must be an object.")
+        return
+    _unexpected(errors, approval, APPROVAL_KEYS, path)
+    for key in APPROVAL_KEYS & set(approval):
+        if not isinstance(approval[key], bool):
+            errors.append(f"{path}.{key} must be true or false.")
+
+
+def _breakdown(errors, item, path):
+    _unexpected(errors, item, BREAKDOWN_KEYS, path)
+    if not _is_text(item.get("field")):
+        errors.append(f"{path}.field must be the application field to count by.")
+
+
+def _report(errors, report, path):
+    if not isinstance(report, dict):
+        errors.append(f"{path} must be an object.")
+        return
+    _unexpected(errors, report, {"breakdowns"}, path)
+    _keyed_items(errors, report.get("breakdowns", []), f"{path}.breakdowns", _breakdown)
+
+
 def _programme(errors, code, programme, path):
     if not isinstance(programme, dict):
         errors.append(f"{path} must be an object.")
@@ -201,6 +228,10 @@ def _programme(errors, code, programme, path):
         _shortlist(errors, programme["shortlist"], f"{path}.shortlist")
     if "documents" in programme:
         _documents(errors, programme["documents"], f"{path}.documents")
+    if "approval" in programme:
+        _approval(errors, programme["approval"], f"{path}.approval")
+    if "report" in programme:
+        _report(errors, programme["report"], f"{path}.report")
 
 
 def validate_programmes(programmes, path="programmes"):

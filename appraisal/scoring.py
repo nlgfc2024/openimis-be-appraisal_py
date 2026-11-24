@@ -170,12 +170,9 @@ def _city(location, location_type, cache):
     return cache[location.id]
 
 
-@transaction.atomic
-def shortlist_round(user, programme, round):
-    """Rank the round's scored appraisals and shortlist the top places, by city when configured.
-
-    Returns {group: {"places", "ranked", "shortlisted"}}; the group is the city, or None for an overall shortlist.
-    """
+def _rank_round(user, programme, round):
+    """Score the round's eligible appraisals and rank the scored ones; returns (appraisals, ranking), the ranking
+    [(group, places, members best first)] with the group the city, or None for an overall shortlist."""
     pending = Appraisal.objects.filter(programme=programme, round=round, status=Status.ELIGIBLE, is_deleted=False)
     for appraisal in _locked(pending):
         score_appraisal(appraisal, user)
@@ -206,19 +203,69 @@ def shortlist_round(user, programme, round):
         kobo = appraisal.submission.kobo_id if appraisal.submission_id else 0
         return -appraisal.score, submitted.timestamp() if submitted else 0, kobo, str(appraisal.id)
 
-    summary = {}
+    ranking = []
     for group, members in groups.items():
-        places = per_city.get(group, 0) if per_city else size
         members.sort(key=order)
+        ranking.append((group, per_city.get(group, 0) if per_city else size, members))
+    return appraisals, ranking
+
+
+def _proposal(ranking):
+    """The shortlist as data, to keep for approval and compare when it is applied."""
+    return [{"id": str(appraisal.id), "group": group, "rank": position, "shortlisted": position <= places,
+             "score": str(appraisal.score)}
+            for group, places, members in ranking for position, appraisal in enumerate(members, start=1)]
+
+
+def _summary(ranking):
+    return {group: {"places": places, "ranked": len(members), "shortlisted": min(places, len(members))}
+            for group, places, members in ranking}
+
+
+def _apply_shortlist(user, appraisals, ranking, approved_by=None, requested_by=None):
+    for group, places, members in ranking:
         for position, appraisal in enumerate(members, start=1):
             _set_shortlisted(appraisal, position, position <= places, user)
-        summary[group] = {"places": places, "ranked": len(members), "shortlisted": min(places, len(members))}
-    log = {"by": user.username, "at": timezone.now().isoformat(),
-           "groups": [{"group": group, **counts} for group, counts in summary.items()]}
+    log = {"by": (requested_by or user).username, "at": timezone.now().isoformat(),
+           "groups": [{"group": group, **counts} for group, counts in _summary(ranking).items()]}
+    if approved_by is not None:
+        log["approved_by"] = approved_by.username
     for appraisal in appraisals:
         appraisal.json_ext = {**(appraisal.json_ext or {}), SHORTLIST_LOG: log}
         appraisal.save(user=user)
+
+
+@transaction.atomic
+def shortlist_round(user, programme, round):
+    """Rank the round's scored appraisals and shortlist the top places, by city when configured; when the programme
+    requires approval, the shortlist waits for it (appraisal.approvals) instead.
+
+    Returns {group: {"places", "ranked", "shortlisted"}}; the group is the city, or None for an overall shortlist.
+    """
+    from appraisal.approvals import Kind as ApprovalKind, approval_required, check_not_pending, request_approval
+
+    check_not_pending(ApprovalKind.SHORTLIST, programme, round)
+    appraisals, ranking = _rank_round(user, programme, round)
+    summary = _summary(ranking)
+    if approval_required(appraisals[0].config_snapshot, ApprovalKind.SHORTLIST):
+        groups = [{"group": group, **counts} for group, counts in summary.items()]
+        request_approval(user, ApprovalKind.SHORTLIST, programme, round, {"ranking": _proposal(ranking)}, {
+            "groups": groups,
+            "ranked": sum(group["ranked"] for group in groups),
+            "shortlisted": sum(group["shortlisted"] for group in groups),
+        })
+        return summary
+    _apply_shortlist(user, appraisals, ranking)
     return summary
+
+
+def apply_shortlist_approval(approval, user):
+    """Apply an approved shortlist, if the round still ranks as it did when it was asked for."""
+    appraisals, ranking = _rank_round(user, approval.programme, approval.round)
+    if _proposal(ranking) != approval.proposal.get("ranking"):
+        raise ValidationError("appraisal.shortlist_changed: scores or applicants changed since the shortlist was "
+                              "asked for; run it again")
+    _apply_shortlist(user, appraisals, ranking, approved_by=user, requested_by=approval.requested_by)
 
 
 def _set_shortlisted(appraisal, rank, shortlisted, user):

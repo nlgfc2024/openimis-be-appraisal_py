@@ -72,6 +72,11 @@ def _apply(individual, code, programme, submission, context, user):
     appraisal.save(user=user)
     for item in rules.get("eligibility", []):
         _apply_item(appraisal, item, evaluate_item(item, context), user)
+    if appraisal.status == Appraisal.Status.SCORED:
+        from appraisal.scoring import score_appraisal
+
+        # New answers or documents refresh the system points; an officer's points stay
+        score_appraisal(appraisal, user)
     return appraisal
 
 

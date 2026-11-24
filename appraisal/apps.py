@@ -83,6 +83,9 @@ class AppraisalConfig(AppConfig):
             self._load_config(copy.deepcopy(DEFAULT_CONFIG))
             logger.error("The saved %s configuration is invalid, so no programme is appraised until it is fixed: %s",
                          self.name, AppraisalConfig.config_error)
+        from appraisal import receivers
+
+        receivers.connect()
 
     def _validate_module_config(self, instance):
         """Reject an invalid configuration on save, before the next restart reads it."""

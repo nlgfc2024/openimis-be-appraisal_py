@@ -28,7 +28,9 @@ PROGRAMME = {
              "scoring": {"type": "numeric_bands", "bands": [{"min": 5000001, "points": 15}]}},
         ],
     },
-    "shortlist": {"size": 1200, "per_city": {"Blantyre": 526, "Zomba": 104, "Lilongwe": 401, "Mzuzu": 169}},
+    "shortlist": {"per_city": {"Blantyre": 526, "Zomba": 104, "Lilongwe": 401, "Mzuzu": 169},
+                  "city": {"field": "biz_city", "location_type": "R"},
+                  "individual_field": "umep_2026_r1_desk_appraisal"},
 }
 
 
@@ -90,7 +92,8 @@ class ProgrammeConfigTest(SimpleTestCase):
             (_with(["scoring", "components"], []), "programmes.UMEP.scoring.components must be a non-empty list."),
             (_with(["scoring", "components", 0, "weight"], 0),
              "programmes.UMEP.scoring.components[0].weight must be a positive number."),
-            (_with(["shortlist"], {}), "programmes.UMEP.shortlist needs size, per_city, or both."),
+            (_with(["shortlist"], {}), "programmes.UMEP.shortlist needs either size (one overall shortlist) or "
+                                       "per_city (places per city), not both."),
             (_with(["shortlist", "per_city", "Zomba"], 0),
              "programmes.UMEP.shortlist.per_city['Zomba'] must be a positive whole number of places."),
             (_with(["shortlist", "size"], True), "programmes.UMEP.shortlist.size must be a positive whole number."),

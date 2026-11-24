@@ -62,7 +62,7 @@ def _keyed_items(errors, items, path, check):
 def _eligibility_item(errors, item, path):
     from calcrule_validations.strategies import ValidationStrategyStorage
 
-    from appraisal.checks import CHECKS
+    from appraisal.checks import CHECKS, params_errors
 
     _unexpected(errors, item, ELIGIBILITY_KEYS, path)
     strategy, check = item.get("strategy"), item.get("check")
@@ -80,8 +80,11 @@ def _eligibility_item(errors, item, path):
         errors.append(f"{path}.field must be a non-empty string.")
     if strategy is not None and "field" not in item:
         errors.append(f"{path}.field is required when a strategy pre-fills the item.")
-    if "params" in item and not isinstance(item["params"], dict):
+    params = item.get("params", {})
+    if not isinstance(params, dict):
         errors.append(f"{path}.params must be an object.")
+    elif check in CHECKS:
+        errors.extend(params_errors(check, params, f"{path}.params"))
 
 
 def _inputs(errors, inputs, path):

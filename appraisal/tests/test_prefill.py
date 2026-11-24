@@ -41,8 +41,13 @@ PROGRAMME = {
         {"key": "designated_city", "label": "Designated city", "field": "biz_city", "location_type": "R",
          "strategy": "ValueInListValidationStrategy", "params": {"values": ["325", "LL01"]}},
         {"key": "legally_established", "label": "Legally established", "strategy": None},
-        {"key": "youth_ownership", "label": "Youth ownership", "check": "youth_ownership"},
-        {"key": "co_financing", "label": "Co-financing", "check": "co_financing"},
+        {"key": "youth_ownership", "label": "Youth ownership", "check": "youth_ownership", "params": {
+            "legal_form_field": "legal_form", "sole_forms": ["sole_proprietorship"], "dob_field": "dob",
+            "min_age": 18, "max_age": 35, "min_share": 80, "template": "ownership_template",
+            "columns": {"age": "Age", "share": "Ownership %"}}},
+        {"key": "co_financing", "label": "Co-financing", "check": "co_financing", "params": {
+            "template": "grant_request_template", "min_share": 30, "sources_field": "contribution_sources",
+            "columns": {"applicant": "Applicant contribution", "project": "Project contribution"}}},
     ],
     "inputs": {
         "months_in_operation": {"derive": "months_since", "field": "business_start_date"},
@@ -103,9 +108,9 @@ class PrefillTestCase(TestCase):
         self.addCleanup(patcher.stop)
         self.individual = create_individual(self.user.username)
 
-    def _submission(self, kobo_id=1, **answers):
+    def _submission(self, kobo_id=1, asset_uid="aForm", submitted_at=SUBMITTED, **answers):
         return KoboSubmission.objects.create(
-            source_type="kobo", asset_uid="aForm", kobo_id=kobo_id, submitted_at=SUBMITTED,
+            source_type="kobo", asset_uid=asset_uid, kobo_id=kobo_id, submitted_at=submitted_at,
             data={"_id": kobo_id, "_submission_time": "2026-11-23T08:30:00", **ANSWERS, **answers},
             individual=self.individual, status=KoboSubmission.Status.IMPORTED)
 
@@ -153,6 +158,15 @@ class ApplySubmissionTest(PrefillTestCase):
 
         self.assertEqual(items["youth_age"].system_result, "NO")
         self.assertEqual(items["registration"].system_result, "YES")
+
+    def test_a_configured_reference_date_replaces_the_submission_date(self):
+        rules = {**PROGRAMME, "eligibility": [{**PROGRAMME["eligibility"][0],
+                                               "params": {"min": 18, "max": 35, "reference_date": "2026-01-01"}}]}
+        with patch.object(AppraisalConfig, "programmes", {"UMEP": rules}):
+            _, items = self._apply(self._submission(**{"applicant/dob": "1990-11-23"}))
+
+        self.assertEqual((items["youth_age"].system_result, items["youth_age"].basis["note"]),
+                         ("YES", "Aged 35 on 2026-01-01"))
 
     def test_a_replaced_temporary_city_code_still_matches(self):
         city = Location.objects.create(code="LL01", name="Lilongwe", type="R", audit_user_id=-1)
@@ -212,6 +226,25 @@ class RefreshTest(PrefillTestCase):
         self.assertEqual(appraisal.submission_id, newer.id)
         self.assertEqual(items["education"].system_result, "NO")
         self.assertEqual(Appraisal.objects.count(), 1)
+
+    def test_a_newer_application_on_another_form_is_judged_by_its_submission_time(self):
+        later = self._submission(1, asset_uid="bForm", submitted_at=SUBMITTED.replace(day=24),
+                                 **{"applicant/highest_education": "pslc"})
+        self._apply(later)
+
+        appraisal, _ = self._apply(self._submission(9))
+
+        self.assertEqual(appraisal.submission_id, later.id)
+
+    def test_a_changed_system_value_after_the_decision_is_flagged(self):
+        appraisal, _ = self._apply(self._submission())
+        Appraisal.objects.filter(id=appraisal.id).update(status=Appraisal.Status.ELIGIBLE)
+
+        _, items = self._apply(self._submission(2, **{"applicant/highest_education": "pslc"}))
+
+        self.assertEqual(items["education"].system_result, "NO")
+        self.assertTrue(items["education"].basis_changed)
+        self.assertFalse(items["youth_age"].basis_changed)
 
     def test_the_rules_in_force_at_creation_keep_applying(self):
         submission = self._submission()
@@ -291,6 +324,15 @@ class TemplateChecksTest(PrefillTestCase):
         self._document(submission, "grant_request_template", workbook([GRANT, ["Oven", 1000000, 200000, 800000]]))
         _, items = self._apply(submission)
         self.assertEqual((items["co_financing"].basis["proposed"], items["co_financing"].basis["share"]), ("NO", 20.0))
+
+    def test_an_unreadable_contribution_stays_pending(self):
+        submission = self._submission()
+        self._document(submission, "grant_request_template", workbook([
+            GRANT, ["Oven", 1000000, "MWK 300,000", 700000], ["Flour", 100000, None, 100000]]))
+        _, items = self._apply(submission)
+        basis = items["co_financing"].basis
+        self.assertEqual((items["co_financing"].system_result, "proposed" in basis, basis["note"]),
+                         ("PENDING", False, "Contributions can't be read: MWK 300,000"))
 
 
 class SignalTest(PrefillTestCase):
@@ -381,6 +423,17 @@ class PrefillConfigTest(SimpleTestCase):
         self.assertRejected({"check": "ownership"},
                             message="programmes.UMEP.eligibility[0].check must be one of: co_financing, "
                                     "youth_ownership.")
+
+    def test_check_params_are_required_and_typed(self):
+        youth = PROGRAMME["eligibility"][5]
+        self.assertRejected({"check": "co_financing", "params": {"min_share": 30}},
+                            message="programmes.UMEP.eligibility[0].params.template is required by co_financing.")
+        self.assertRejected({"check": "youth_ownership", "params": {**youth["params"], "min_share": "80"}},
+                            message="programmes.UMEP.eligibility[0].params.min_share must be a number.")
+        self.assertRejected({"check": "youth_ownership", "params": {**youth["params"], "columns": {"age": "Age"}}},
+                            message="programmes.UMEP.eligibility[0].params.columns must name the columns age, share.")
+        self.assertRejected({"check": "youth_ownership", "params": {**youth["params"], "min": 1}},
+                            message="programmes.UMEP.eligibility[0].params.min is not a parameter of youth_ownership.")
 
     def test_one_of_strategy_or_check(self):
         self.assertRejected({"field": "dob", "strategy": "AgeRangeValidationStrategy", "check": "co_financing"},

@@ -1,6 +1,6 @@
 """Shape of the appraisal module configuration. Every problem is reported with its path, e.g.
-``programmes.UMEP.eligibility[2].key``. Strategy and check names must exist; score rules are checked for
-shape (their points by the scoring)."""
+``programmes.UMEP.eligibility[2].key``. Strategy and check names must exist; score rules are checked with
+enrolment's validate_scoring."""
 import re
 
 from django.core.exceptions import ValidationError
@@ -12,7 +12,7 @@ ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "loc
 LOCATION_TYPES = ("R", "D", "W", "V")
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
-SHORTLIST_KEYS = {"size", "per_city"}
+SHORTLIST_KEYS = {"size", "per_city", "location_type"}
 
 
 def _is_number(value):
@@ -112,6 +112,13 @@ def _score_component(errors, item, path):
         errors.append(f"{path}.weight must be a positive number.")
     if not isinstance(item.get("scoring"), dict):
         errors.append(f"{path}.scoring must be an object.")
+        return
+    from enrolment.ranking import validate_scoring
+
+    try:
+        validate_scoring(item["scoring"], f"{path}.scoring")
+    except ValidationError as exc:
+        errors.extend(exc.messages)
 
 
 def _scoring(errors, scoring, path):
@@ -136,6 +143,8 @@ def _shortlist(errors, shortlist, path):
     _unexpected(errors, shortlist, SHORTLIST_KEYS, path)
     if "size" not in shortlist and "per_city" not in shortlist:
         errors.append(f"{path} needs size, per_city, or both.")
+    if "location_type" in shortlist and shortlist["location_type"] not in LOCATION_TYPES:
+        errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
     if "size" in shortlist and not _positive_int(shortlist["size"]):
         errors.append(f"{path}.size must be a positive whole number.")
     per_city = shortlist.get("per_city")

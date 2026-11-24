@@ -108,6 +108,10 @@ def review_document(user, appraisal_id, document_id, status, comment=""):
     document = ApplicantDocument.objects.filter(id=document_id, submission_id=appraisal.submission_id).first()
     if document is None:
         raise ValidationError("appraisal.document_not_found: not a document of the appraised application")
+    # A document still downloading, or that failed to download, has no file anyone could have opened
+    if status == Status.VERIFIED and document.status != ApplicantDocument.Status.STORED:
+        raise ValidationError(f"appraisal.document_not_stored: the document is {document.get_status_display().lower()}, "
+                              "so it can be rejected but not verified")
     review = appraisal.document_reviews.filter(document=document, is_deleted=False).first() or \
         DocumentReview(appraisal=appraisal, document=document)
     review.status, review.comment, review.reviewed_by, review.reviewed_at = status, comment, user, timezone.now()

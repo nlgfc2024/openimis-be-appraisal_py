@@ -183,8 +183,9 @@ An officer answers checklist items and records the eligibility decision (Operati
 - `required` lists document types (Kobo file question names); an entry with `when` is required only when that
   answer is one of `in` (a multiple-choice answer when any of its choices is).
 - Each uploaded document is `SUBMITTED` until an officer marks it `VERIFIED` or `REJECTED` (with the reason,
-  `reviewApplicantDocument`); a required document the application lacks is `OUTSTANDING`. The first review moves a
-  received appraisal to `DOCUMENT_CHECK`.
+  `reviewApplicantDocument`); a required document the application lacks is `OUTSTANDING`. Only a document stored
+  in the MIS (msr_etl `STORED`) can be verified; one still downloading or failed can only be rejected
+  (`appraisal.document_not_stored`). The first review moves a received appraisal to `DOCUMENT_CHECK`.
 - The eligibility decision is refused (`appraisal.documents_incomplete`) until every required document is
   `VERIFIED` and none is `REJECTED`. A programme without `documents` has no document check.
 

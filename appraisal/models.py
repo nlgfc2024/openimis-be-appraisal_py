@@ -170,3 +170,81 @@ class AppraisalItem(core_models.HistoryModel):
         if queryset is None:
             queryset = cls.objects.all()
         return queryset.filter(appraisal__in=Appraisal.get_queryset(None, user))
+
+
+class DocumentReview(core_models.HistoryModel):
+    """An officer's review of one uploaded document of the appraised application (Operations Manual 8.1d).
+
+    A document not reviewed yet is SUBMITTED; a required document the application lacks is OUTSTANDING without a
+    review row (appraisal.documents works both out).
+    """
+    USE_CACHE = False
+
+    class Status(models.TextChoices):
+        SUBMITTED = "SUBMITTED", _("Submitted")
+        VERIFIED = "VERIFIED", _("Verified")
+        REJECTED = "REJECTED", _("Rejected")
+        OUTSTANDING = "OUTSTANDING", _("Outstanding")
+
+    appraisal = models.ForeignKey(Appraisal, models.DO_NOTHING, related_name="document_reviews")
+    document = models.ForeignKey("msr_etl.ApplicantDocument", models.PROTECT, related_name="appraisal_reviews")
+    status = models.CharField(max_length=16, choices=Status.choices)
+    comment = models.TextField(blank=True, default="")
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, models.DO_NOTHING, related_name="+")
+    reviewed_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["appraisal", "document"],
+                condition=Q(is_deleted=False),
+                name="appraisal_document_review_one_active",
+            ),
+            # Only a decision is stored; SUBMITTED and OUTSTANDING are worked out
+            models.CheckConstraint(check=Q(status__in=["VERIFIED", "REJECTED"]),
+                                   name="appraisal_document_review_decided"),
+        ]
+
+    @classmethod
+    def get_queryset(cls, queryset, user):
+        if queryset is None:
+            queryset = cls.objects.all()
+        return queryset.filter(appraisal__in=Appraisal.get_queryset(None, user))
+
+
+class AppraisalReturn(core_models.HistoryModel):
+    """An appraisal returned for action (Operations Manual 8.8d): why, what is needed, by whom and when, and its
+    resubmission. While a return is open the appraisal is RETURNED; resubmission restores ``previous_status``."""
+    USE_CACHE = False
+
+    appraisal = models.ForeignKey(Appraisal, models.DO_NOTHING, related_name="returns")
+    stage = models.CharField(max_length=32, choices=Appraisal.Stage.choices)
+    previous_status = models.CharField(max_length=32, choices=Appraisal.Status.choices)
+    reason = models.TextField()
+    action_required = models.TextField()
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, models.DO_NOTHING, related_name="+")
+    returned_at = models.DateTimeField()
+    resubmitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, models.DO_NOTHING, null=True, blank=True,
+                                       related_name="+")
+    resubmitted_at = models.DateTimeField(null=True, blank=True)
+    resubmission_note = models.TextField(blank=True, default="")
+
+    class Meta:
+        constraints = [
+            # At most one open return per appraisal
+            models.UniqueConstraint(
+                fields=["appraisal"],
+                condition=Q(is_deleted=False, resubmitted_at__isnull=True),
+                name="appraisal_return_one_open",
+            ),
+        ]
+
+    @property
+    def is_open(self):
+        return self.resubmitted_at is None
+
+    @classmethod
+    def get_queryset(cls, queryset, user):
+        if queryset is None:
+            queryset = cls.objects.all()
+        return queryset.filter(appraisal__in=Appraisal.get_queryset(None, user))

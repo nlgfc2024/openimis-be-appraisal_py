@@ -57,6 +57,7 @@ def refresh_for_document(document):
 def _apply(individual, code, programme, submission, context, user):
     appraisal = Appraisal.objects.filter(
         individual=individual, programme=code, round=programme["round"], is_deleted=False).first()
+    previous_submission = appraisal.submission_id if appraisal else None
     if appraisal is None:
         appraisal = Appraisal(individual=individual, programme=code, round=programme["round"],
                               submission=submission, config_snapshot=programme)
@@ -72,6 +73,10 @@ def _apply(individual, code, programme, submission, context, user):
     appraisal.save(user=user)
     for item in rules.get("eligibility", []):
         _apply_item(appraisal, item, evaluate_item(item, context), user)
+    if appraisal.status == Appraisal.Status.RETURNED and previous_submission != submission.id:
+        from appraisal.returns import resubmit_on_new_application
+
+        resubmit_on_new_application(appraisal, submission, user)
     if appraisal.status == Appraisal.Status.SCORED:
         from appraisal.scoring import score_appraisal
 

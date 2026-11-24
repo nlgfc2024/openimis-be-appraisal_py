@@ -134,6 +134,31 @@ An officer answers checklist items and records the eligibility decision (Operati
 - Items can be answered, and a decision recorded, only while screening is open (`RECEIVED`, `DOCUMENT_CHECK`,
   `DESK_SCREENING`).
 
+## Document check and return for action
+
+**Document check** (Operations Manual 8.1d), when the programme sets `documents`:
+
+```json
+"documents": {"required": [
+  "doc_national_id",
+  {"type": "ownership_template", "when": {"field": "legal_form", "in": ["partnership_group", "limited_company"]}}
+]}
+```
+
+- `required` lists document types (Kobo file question names); an entry with `when` is required only when that
+  answer is one of `in` (a multiple-choice answer when any of its choices is).
+- Each uploaded document is `SUBMITTED` until an officer marks it `VERIFIED` or `REJECTED` (with the reason,
+  `reviewApplicantDocument`); a required document the application lacks is `OUTSTANDING`. The first review moves a
+  received appraisal to `DOCUMENT_CHECK`.
+- The eligibility decision is refused (`appraisal.documents_incomplete`) until every required document is
+  `VERIFIED` and none is `REJECTED`. A programme without `documents` has no document check.
+
+**Return for action** (8.8d): `returnAppraisal` sends an appraisal still being screened or scored back with the
+reason and the action required. It becomes `RETURNED`, keeping its stage, and nothing can be answered, decided or
+scored until `resubmitAppraisal` closes the return (who, when, a note) and restores its status. A newer application
+from the applicant resubmits it automatically. At most one return is open at a time; every return stays on the
+appraisal, and returns and document reviews appear in its `history`.
+
 ## Desk scoring and the shortlist
 
 Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, stage 2):
@@ -182,7 +207,8 @@ query {
   `needsReview` (an item's basis changed). Needs `gql_query_appraisal_perms`; a user sees the appraisals of the
   individuals in their locations.
 - `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the
-  values that count; score items also give `maxPoints`. `history` lists the changes to the appraisal and its
+  values that count; score items also give `maxPoints`. `documents` is the document check (`documentsComplete`),
+  `returns` the returns for action. `history` lists the changes to the appraisal and its
   items (field, old, new), newest first.
 - The application's answers and documents are read with msr_etl's `koboApplications(individualId)` and
   `applicantDocuments(individualId)`, under msr_etl's own rights.
@@ -194,6 +220,9 @@ query {
 | `scoreAppraisals` | `programme`, `round`, `ids` (optional) | `gql_mutation_score_appraisal_perms` |
 | `answerAppraisalScore` | `id` (score item), `points`, `evidence`, `comment` | `gql_mutation_score_appraisal_perms` |
 | `shortlistAppraisals` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
+| `reviewApplicantDocument` | `appraisalId`, `documentId`, `status` (`VERIFIED`/`REJECTED`), `comment` | `gql_mutation_review_document_perms` |
+| `returnAppraisal` | `id`, `reason`, `actionRequired` | `gql_mutation_return_appraisal_perms` |
+| `resubmitAppraisal` | `id`, `note` | `gql_mutation_return_appraisal_perms` |
 
 Mutations are logged and run like every openIMIS mutation (`mutationLogs` by `clientMutationId`); a refused one
 reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.

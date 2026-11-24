@@ -59,6 +59,7 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
         cls.viewer = create_test_interactive_user(
             username="appraisalApiViewer",
             roles=[_role("Appraisal viewer", [RIGHT_APPRAISAL_VIEW, INDIVIDUAL_SEARCH], cls.admin).id])
+        assign_user_districts(cls.viewer, [village_a.parent.parent.code])
         cls.viewer_token = BaseTestContext(user=cls.viewer).get_jwt()
         cls.appraisal_only = create_test_interactive_user(
             username="appraisalApiOnly", roles=[_role("Appraisal only", [RIGHT_APPRAISAL_VIEW], cls.admin).id])
@@ -120,6 +121,25 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
             with self.assertRaisesRegex(ValueError, "appraisal.not_configured"):
                 self.send_mutation_raw(f'''mutation {{ decideAppraisalEligibility(input: {{id: "{self.appraisal_a.id}"}})
                     {{ internalId }} }}''', self.admin_token)
+
+    def test_the_page_is_told_what_the_user_may_do(self):
+        query = """query ($id: ID) { appraisal(id: $id) { edges { node { canScreen canDecide canReopen
+            decisionPreview { decision pending unanswered changed problem } } } } }"""
+
+        def node(token):
+            response = self.query(query, variables={"id": str(self.appraisal_a.id)},
+                                  headers={"HTTP_AUTHORIZATION": f"Bearer {token}"})
+            return json.loads(response.content)["data"]["appraisal"]["edges"][0]["node"]
+
+        screener = node(self.screener_token)
+        self.assertEqual((screener["canScreen"], screener["canDecide"], screener["canReopen"]), (True, True, False))
+        self.assertEqual(screener["decisionPreview"], {"decision": "CLARIFICATION", "pending": ["co_financing"],
+                                                       "unanswered": [], "changed": [], "problem": None})
+        viewer = node(self.viewer_token)
+        self.assertEqual((viewer["canScreen"], viewer["canDecide"]), (False, False))
+        Appraisal.objects.filter(id=self.appraisal_a.id).update(status="INELIGIBLE")
+        self.assertEqual((node(self.screener_token)["canScreen"], node(self.reopener_token)["canReopen"]),
+                         (False, True))
 
     def test_applicant_data_needs_the_individual_search_right_too(self):
         content = self._appraisals(self.appraisal_only_token)

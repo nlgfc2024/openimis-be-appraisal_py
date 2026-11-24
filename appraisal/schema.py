@@ -22,7 +22,8 @@ from appraisal.gql_mutations import (
     ScoreAppraisalsMutation,
     ShortlistAppraisalsMutation,
 )
-from appraisal.gql_queries import AppraisalApprovalGQLType, AppraisalGQLType, AppraisalReportGQLType
+from appraisal.gql_queries import AppraisalApprovalGQLType, AppraisalGQLType, AppraisalReportGQLType, \
+    AppraisalRoundGQLType
 from appraisal.models import Appraisal, AppraisalApproval
 
 
@@ -109,6 +110,21 @@ class Query(graphene.ObjectType):
         user = info.context.user
         _require_view(user)
         return appraisal_report(user, programme, round)
+
+    appraisal_rounds = graphene.List(AppraisalRoundGQLType,
+                                     description="Configured rounds and rounds with appraisals, for choosing one")
+
+    def resolve_appraisal_rounds(self, info):
+        from django.db.models import Count
+
+        _require_view(info.context.user)
+        visible = Appraisal.get_queryset(Appraisal.objects.filter(is_deleted=False), info.context.user)
+        counts = {(row["programme"], row["round"]): row["n"]
+                  for row in visible.values("programme", "round").annotate(n=Count("id"))}
+        configured = {(code, programme.get("round")) for code, programme in (AppraisalConfig.programmes or {}).items()}
+        return [{"programme": programme, "round": round, "configured": (programme, round) in configured,
+                 "appraisals": counts.get((programme, round), 0)}
+                for programme, round in sorted(configured | set(counts), key=lambda key: (key[0], key[1] or ""))]
 
     def resolve_appraisal(self, info, **kwargs):
         user = info.context.user

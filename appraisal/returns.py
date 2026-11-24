@@ -24,16 +24,33 @@ def _locked(user, appraisal_id):
     return appraisal
 
 
+def return_problem(appraisal):
+    """Why the appraisal can't be returned for action now, or None (the rule return_appraisal applies)."""
+    if appraisal.status not in RETURNABLE:
+        return f"appraisal.not_returnable: the appraisal is {appraisal.get_status_display().lower()}"
+    from appraisal.approvals import Kind as ApprovalKind, check_not_pending
+
+    # A decision awaiting approval is approved or rejected first, so no task is left open on a returned appraisal
+    try:
+        check_not_pending(ApprovalKind.ELIGIBILITY, appraisal=appraisal)
+    except ValidationError as exc:
+        return exc.messages[0]
+    return None
+
+
+def can_resubmit(appraisal):
+    """Whether the appraisal has an open return to close (the rule resubmit_appraisal applies)."""
+    return appraisal.status == Status.RETURNED and \
+        appraisal.returns.filter(is_deleted=False, resubmitted_at__isnull=True).exists()
+
+
 @transaction.atomic
 def return_appraisal(user, appraisal_id, reason, action_required):
     """Return the appraisal for action; returns the AppraisalReturn."""
     appraisal = _locked(user, appraisal_id)
-    if appraisal.status not in RETURNABLE:
-        raise ValidationError(f"appraisal.not_returnable: the appraisal is {appraisal.get_status_display().lower()}")
-    from appraisal.approvals import Kind as ApprovalKind, check_not_pending
-
-    # A decision awaiting approval is approved or rejected first, so no task is left open on a returned appraisal
-    check_not_pending(ApprovalKind.ELIGIBILITY, appraisal=appraisal)
+    problem = return_problem(appraisal)
+    if problem:
+        raise ValidationError(problem)
     reason, action_required = (reason or "").strip(), (action_required or "").strip()
     if not reason or not action_required:
         raise ValidationError("appraisal.return_details_required: give the reason and the action required")
@@ -47,9 +64,9 @@ def return_appraisal(user, appraisal_id, reason, action_required):
 
 
 def _resubmit(appraisal, user, note):
-    open_return = appraisal.returns.filter(is_deleted=False, resubmitted_at__isnull=True).first()
-    if appraisal.status != Status.RETURNED or open_return is None:
+    if not can_resubmit(appraisal):
         raise ValidationError("appraisal.not_returned")
+    open_return = appraisal.returns.filter(is_deleted=False, resubmitted_at__isnull=True).first()
     open_return.resubmitted_by, open_return.resubmitted_at = user, timezone.now()
     open_return.resubmission_note = (note or "").strip()
     open_return.save(user=user)

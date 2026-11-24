@@ -47,6 +47,62 @@ def _check_open(appraisal):
     check_not_pending(ApprovalKind.ELIGIBILITY, appraisal=appraisal)
 
 
+def screening_problem(appraisal):
+    """Why the appraisal's checklist can't be answered now, or None (the rule answer_item applies)."""
+    try:
+        _check_open(appraisal)
+    except ValidationError as exc:
+        return exc.messages[0]
+    return None
+
+
+def decision_preview(appraisal):
+    """What the checklist leads to now (Annex 2A), as decide_eligibility applies it: ``decision`` from the answers
+    that count (any No is INELIGIBLE, else any Pending CLARIFICATION, else ELIGIBLE; None while an item is
+    unanswered), the ``results`` by key, the ``ineligible``, ``pending``, ``unanswered`` and ``changed`` keys, and
+    ``problem``, the refusal that stops the decision now (an unanswered or changed item, or an incomplete document
+    check), or None."""
+    checklist = appraisal.items.filter(kind=AppraisalItem.Kind.ELIGIBILITY, is_deleted=False)
+    items = {item.key: item for item in checklist}
+    keys = [rule["key"] for rule in (appraisal.config_snapshot or {}).get("eligibility", [])]
+    results = {key: items[key].result if key in items else None for key in keys}
+    unanswered = [key for key, result in results.items() if result is None]
+    changed = [key for key in keys if key in items and items[key].basis_changed]
+    values = set(results.values())
+    if not keys or unanswered:
+        decision = None
+    elif Result.NO in values:
+        decision = Eligibility.INELIGIBLE
+    elif Result.PENDING in values:
+        decision = Eligibility.CLARIFICATION
+    else:
+        decision = Eligibility.ELIGIBLE
+    if not keys or unanswered:
+        problem = f"appraisal.checklist_incomplete: {', '.join(unanswered) or 'no checklist'}"
+    elif changed:
+        problem = f"appraisal.answers_changed: review {', '.join(changed)} again"
+    else:
+        problem = None
+    if problem is None:
+        from appraisal.documents import documents_problems
+
+        problems = documents_problems(appraisal)
+        if problems:
+            listed = ", ".join(f"{label} ({status.lower()})" for label, status in problems)
+            problem = f"appraisal.documents_incomplete: {listed}"
+    return {"decision": decision, "results": results, "unanswered": unanswered, "changed": changed,
+            "ineligible": [key for key, result in results.items() if result == Result.NO],
+            "pending": [key for key, result in results.items() if result == Result.PENDING], "problem": problem}
+
+
+def _decision(appraisal):
+    """The checklist's decision, refused while it can't be taken; returns (decision, {key: result})."""
+    preview = decision_preview(appraisal)
+    if preview["problem"]:
+        raise ValidationError(preview["problem"])
+    return preview["decision"], preview["results"]
+
+
 @transaction.atomic
 def answer_item(user, item_id, result, evidence="", comment=""):
     """Record the officer's answer to an eligibility item; returns the item."""
@@ -71,32 +127,6 @@ def answer_item(user, item_id, result, evidence="", comment=""):
         appraisal.stage, appraisal.status = Stage.DESK_SCREENING, Status.DESK_SCREENING
         appraisal.save(user=user)
     return item
-
-
-def _decision(appraisal):
-    """The checklist's decision (Annex 2A), once every item is answered, none changed and the documents checked;
-    returns (decision, {key: result})."""
-    checklist = appraisal.items.filter(kind=AppraisalItem.Kind.ELIGIBILITY, is_deleted=False)
-    items = {item.key: item for item in checklist}
-    keys = [rule["key"] for rule in (appraisal.config_snapshot or {}).get("eligibility", [])]
-    missing = [key for key in keys if key not in items or items[key].result is None]
-    if not keys or missing:
-        raise ValidationError(f"appraisal.checklist_incomplete: {', '.join(missing) or 'no checklist'}")
-    changed = [key for key in keys if items[key].basis_changed]
-    if changed:
-        raise ValidationError(f"appraisal.answers_changed: review {', '.join(changed)} again")
-    from appraisal.documents import documents_problems
-
-    problems = documents_problems(appraisal)
-    if problems:
-        listed = ", ".join(f"{label} ({status.lower()})" for label, status in problems)
-        raise ValidationError(f"appraisal.documents_incomplete: {listed}")
-    results = {key: items[key].result for key in keys}
-    if Result.NO in results.values():
-        return Eligibility.INELIGIBLE, results
-    if Result.PENDING in results.values():
-        return Eligibility.CLARIFICATION, results
-    return Eligibility.ELIGIBLE, results
 
 
 def _apply_decision(appraisal, user, decision, results, comment, requested_by=None, approved_by=None):

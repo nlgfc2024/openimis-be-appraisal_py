@@ -233,6 +233,23 @@ class DocumentsReturnsApiTest(openIMISGraphQLTestCase):
             variables={"id": str(self.appraisal.id)}, headers={"HTTP_AUTHORIZATION": f"Bearer {self.token}"})
         return json.loads(response.content)["data"]["appraisal"]["edges"][0]["node"]
 
+    def test_the_page_is_told_whether_it_may_return_or_resubmit(self):
+        query = 'query ($id: ID) { appraisal(id: $id) { edges { node { canReturn canResubmit canDecide ' \
+                'decisionPreview { problem } } } } }'
+
+        def node():
+            response = self.query(query, variables={"id": str(self.appraisal.id)},
+                                  headers={"HTTP_AUTHORIZATION": f"Bearer {self.token}"})
+            return json.loads(response.content)["data"]["appraisal"]["edges"][0]["node"]
+
+        before = node()
+        self.assertEqual((before["canReturn"], before["canResubmit"]), (True, False))
+        # The page is told why the decision can't be recorded, as the mutation would refuse it
+        self.assertFalse(before["canDecide"])
+        self.assertTrue(before["decisionPreview"]["problem"].startswith("appraisal."))
+        returns.return_appraisal(self.admin, self.appraisal.id, "ID unreadable", "Send a clear copy")
+        self.assertEqual((node()["canReturn"], node()["canResubmit"]), (False, True))
+
     def test_review_return_and_resubmit_over_graphql_and_in_the_history(self):
         self.send_mutation_raw(f'mutation {{ reviewApplicantDocument(input: {{appraisalId: "{self.appraisal.id}", '
                                f'documentId: "{self.document.id}", status: REJECTED, comment: "Blurred"}}) '

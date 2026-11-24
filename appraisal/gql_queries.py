@@ -146,6 +146,7 @@ class AppraisalGQLType(DjangoObjectType):
     can_reopen = graphene.Boolean(description="The user may reopen the recorded decision")
     can_score = graphene.Boolean(description="The user may correct a score item's value now")
     can_rescore = graphene.Boolean(description="The user may (re)score the appraisal now")
+    can_review_documents = graphene.Boolean(description="The user may verify or reject its documents now")
     can_return = graphene.Boolean(description="The user may return the appraisal for action now")
     can_resubmit = graphene.Boolean(description="The user may resubmit the returned appraisal")
     shortlist_group = graphene.String(description="The quota the last shortlist ranked it in (e.g. its city), or null")
@@ -200,6 +201,11 @@ class AppraisalGQLType(DjangoObjectType):
         from appraisal.scoring import SCORABLE
 
         return _allowed(info, "gql_mutation_score_appraisal_perms") and self.status in SCORABLE
+
+    def resolve_can_review_documents(self, info):
+        from appraisal.documents import review_problem
+
+        return _allowed(info, "gql_mutation_review_document_perms") and review_problem(self) is None
 
     def resolve_can_return(self, info):
         from appraisal.returns import return_problem

@@ -256,7 +256,7 @@ query {
   (`decision` the checklist leads to, the `ineligible`, `pending`, `unanswered` and `changed` keys, and `problem`,
   the refusal that stops the decision now).
   For scoring, `canScore` (correct a value now), `canRescore`, and `shortlistGroup`, the quota the last shortlist
-  ranked the appraisal in. `canReturn` and `canResubmit` follow the return rules, and `decisionPreview.problem`
+  ranked the appraisal in. `canReviewDocuments`, `canReturn` and `canResubmit` follow the document and return rules, and `decisionPreview.problem`
   includes an incomplete document check. `appraisalRounds` lists the configured rounds and the rounds with appraisals the user
   may see (`programme`, `round`, `configured`, `appraisals`), for choosing a round.
 - `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the

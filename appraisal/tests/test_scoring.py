@@ -59,9 +59,10 @@ class ScoringTestCase(TestCase):
     def setUpTestData(cls):
         cls.user = create_test_interactive_user(username="appraisalScorer", roles=[create_admin_role().id])
 
-    def _eligible(self, inputs=None, rules=RULES, location=None, minutes=0, kobo_id=None):
+    def _eligible(self, inputs=None, rules=RULES, location=None, minutes=0, kobo_id=None, answers=None):
         """An eligible appraisal with these score inputs and an application submitted ``minutes`` after SUBMITTED."""
-        individual = create_individual(self.user.username, {"location": location} if location else {})
+        individual = create_individual(self.user.username, {**({"location": location} if location else {}),
+                                                            **({"json_ext": answers} if answers else {})})
         kobo_id = kobo_id or (KoboSubmission.objects.count() + 1)
         submission = KoboSubmission.objects.create(
             source_type="kobo", asset_uid="aForm", kobo_id=kobo_id, data={},
@@ -97,16 +98,18 @@ class ScoreTest(ScoringTestCase):
                                   "additional_jobs": 19, "bank_statement": 0, "stable_market": 12})
         self.assertEqual(appraisal.score, Decimal("52.00"))
 
-    def test_missing_or_unreadable_inputs_score_the_default_and_say_why(self):
+    def test_missing_or_unreadable_inputs_wait_for_an_officer_and_say_why(self):
         appraisal = scoring.score_appraisal(
             self._eligible({"months_in_operation": None, "jobs_to_create": "many"}), self.user)
 
         items = self._items(appraisal)
         self.assertEqual((items["operation_duration"].system_points, items["operation_duration"].basis["note"]),
-                         (0, "No answer; an officer decides"))
+                         (None, "No answer; an officer decides"))
         self.assertEqual((items["additional_jobs"].system_points, items["additional_jobs"].basis["note"]),
-                         (0, "'many' can't be scored; an officer decides"))
-        self.assertEqual(appraisal.score, Decimal("60.00"))
+                         (None, "'many' can't be scored; an officer decides"))
+        self.assertIsNone(appraisal.score)
+        with self.assertRaisesMessage(ValidationError, "appraisal.scores_missing: 1 appraisals without a score"):
+            scoring.shortlist_round(self.user, "UMEP", "2026-R1")
 
     def test_weights_other_than_the_maximum_points_are_normalised(self):
         rules = {**RULES, "scoring": {"normalise_to": 100, "components": [
@@ -141,6 +144,7 @@ class OfficerScoreTest(ScoringTestCase):
         self.market = self._items(self.appraisal)["stable_market"]
 
     def test_an_officer_sets_points_with_evidence_and_the_total_follows(self):
+        self.assertIsNone(self.appraisal.score)
         item = scoring.answer_score(self.user, self.market.id, "12", "Site visit: seasonal sales")
 
         self.appraisal.refresh_from_db()
@@ -183,7 +187,8 @@ class ShortlistTest(ScoringTestCase):
 
     def test_the_top_three_of_five_are_shortlisted_ties_by_submission_time(self):
         jobs = {0: "12", 1: "6", 2: "12", 3: "3", 4: "1"}
-        appraisals = [self._eligible({"jobs_to_create": jobs[i]}, minutes=10 - i) for i in range(5)]
+        rules = {**RULES, "shortlist": {"size": 3, "individual_field": "umep_desk_appraisal_status"}}
+        appraisals = [self._eligible({"jobs_to_create": jobs[i]}, rules=rules, minutes=10 - i) for i in range(5)]
         scoring.score_round(self.user, "UMEP", "2026-R1")
 
         summary = scoring.shortlist_round(self.user, "UMEP", "2026-R1")
@@ -191,9 +196,9 @@ class ShortlistTest(ScoringTestCase):
         self.assertEqual(summary, {None: {"places": 3, "ranked": 5, "shortlisted": 3}})
         self.assertEqual(self._statuses(appraisals), [("SHORTLISTED", 2), ("SHORTLISTED", 3), ("SHORTLISTED", 1),
                                                       ("NOT_SHORTLISTED", 4), ("NOT_SHORTLISTED", 5)])
-        self.assertEqual(Individual.objects.get(id=appraisals[2].individual_id).json_ext["desk_appraisal_status"],
+        self.assertEqual(Individual.objects.get(id=appraisals[2].individual_id).json_ext["umep_desk_appraisal_status"],
                          "SHORTLISTED")
-        self.assertEqual(Individual.objects.get(id=appraisals[4].individual_id).json_ext["desk_appraisal_status"],
+        self.assertEqual(Individual.objects.get(id=appraisals[4].individual_id).json_ext["umep_desk_appraisal_status"],
                          "NOT_SHORTLISTED")
         self.assertEqual(Appraisal.objects.get(id=appraisals[0].id).stage, "SHORTLISTING")
 
@@ -203,16 +208,62 @@ class ShortlistTest(ScoringTestCase):
         b = [self._eligible({"jobs_to_create": str(12 - i)}, rules=rules, location=blantyre, minutes=i)
              for i in range(3)]
         z = [self._eligible(rules=rules, location=zomba, minutes=i) for i in range(2)]
-        m = [self._eligible(rules=rules, location=mzuzu)]
 
         summary = scoring.shortlist_round(self.user, "UMEP", "2026-R1")
 
         self.assertEqual(summary, {"Blantyre": {"places": 2, "ranked": 3, "shortlisted": 2},
-                                   "Zomba": {"places": 3, "ranked": 2, "shortlisted": 2},
-                                   "Mzuzu": {"places": 0, "ranked": 1, "shortlisted": 0}})
+                                   "Zomba": {"places": 3, "ranked": 2, "shortlisted": 2}})
         self.assertEqual(self._statuses(b), [("SHORTLISTED", 1), ("SHORTLISTED", 2), ("NOT_SHORTLISTED", 3)])
         self.assertEqual(self._statuses(z), [("SHORTLISTED", 1), ("SHORTLISTED", 2)])
-        self.assertEqual(self._statuses(m), [("NOT_SHORTLISTED", 1)])
+        self.assertNotIn("umep_desk_appraisal_status", Individual.objects.get(id=b[0].individual_id).json_ext or {})
+
+        self._eligible(rules=rules, location=mzuzu)
+        self._eligible(rules=rules)
+        with self.assertRaisesMessage(ValidationError, "appraisal.city_without_places: Mzuzu (1), no city (1); "
+                                                       "places are set for Blantyre, Zomba"):
+            scoring.shortlist_round(self.user, "UMEP", "2026-R1")
+
+    def test_places_can_go_by_the_business_city(self):
+        rules = {**RULES, "shortlist": {"per_city": {"Blantyre": 1, "Zomba": 1},
+                                        "city": {"field": "biz_city", "location_type": "R"}}}
+        blantyre, zomba = city_village("Blantyre"), city_village("Zomba")
+        blantyre_code = blantyre.parent.parent.parent.code
+        # Both live in Zomba; the one with a Blantyre business takes Blantyre's place
+        in_blantyre = self._eligible(rules=rules, location=zomba, answers={"biz_city": blantyre_code})
+        in_zomba = self._eligible({"jobs_to_create": "1"}, rules=rules, location=zomba,
+                                  answers={"biz_city": zomba.parent.parent.parent.code})
+
+        summary = scoring.shortlist_round(self.user, "UMEP", "2026-R1")
+
+        self.assertEqual(summary, {"Blantyre": {"places": 1, "ranked": 1, "shortlisted": 1},
+                                   "Zomba": {"places": 1, "ranked": 1, "shortlisted": 1}})
+        self.assertEqual(self._statuses([in_blantyre, in_zomba]), [("SHORTLISTED", 1), ("SHORTLISTED", 1)])
+
+    def test_appraisals_under_different_shortlist_rules_block_the_shortlist(self):
+        self._eligible()
+        self._eligible(rules={**RULES, "shortlist": {"size": 5}})
+        with self.assertRaisesMessage(ValidationError, "appraisal.shortlist_rules_differ"):
+            scoring.shortlist_round(self.user, "UMEP", "2026-R1")
+
+    def test_a_closed_shortlist_is_final(self):
+        appraisals = [self._eligible() for _ in range(4)]
+        scoring.shortlist_round(self.user, "UMEP", "2026-R1")
+        late = self._eligible()
+        scoring.score_appraisal(late, self.user)
+        with self.assertRaisesMessage(ValidationError, "appraisal.shortlist_outdated: 1 scored appraisals"):
+            scoring.close_shortlist(self.user, "UMEP", "2026-R1")
+        Appraisal.objects.filter(id=late.id).update(is_deleted=True)
+
+        self.assertEqual(scoring.close_shortlist(self.user, "UMEP", "2026-R1"), 4)
+
+        closed = Appraisal.objects.get(id=appraisals[0].id)
+        self.assertEqual((closed.stage, closed.status), ("CLOSED", "SHORTLISTED"))
+        self.assertEqual(closed.json_ext["shortlist"]["closed"]["by"], "appraisalScorer")
+        self._eligible()
+        for close_or_run in (scoring.shortlist_round, scoring.close_shortlist):
+            with self.assertRaisesMessage(ValidationError, "appraisal.shortlist_closed: the UMEP 2026-R1 shortlist"):
+                close_or_run(self.user, "UMEP", "2026-R1")
+        self.assertEqual(self._statuses(appraisals)[3], ("NOT_SHORTLISTED", 4))
 
     def test_eligible_appraisals_are_scored_first_and_a_rerun_recomputes(self):
         first = self._eligible({"jobs_to_create": "1"})
@@ -245,9 +296,22 @@ class ScoringConfigTest(TestCase):
             validate_programmes({"UMEP": bad})
         self.assertIn("programmes.UMEP.scoring.components[0].scoring.bands must be a non-empty list.",
                       exc.exception.messages)
-        validate_programmes({"UMEP": {**RULES, "shortlist": {"per_city": {"Zomba": 1}, "location_type": "R"}}})
-        with self.assertRaises(ValidationError):
-            validate_programmes({"UMEP": {**RULES, "shortlist": {"size": 1, "location_type": "X"}}})
+        validate_programmes({"UMEP": {**RULES, "shortlist": {
+            "per_city": {"Zomba": 1}, "location_type": "R", "city": {"field": "biz_city", "location_type": "R"},
+            "individual_field": "umep_desk_appraisal_status"}}})
+        cases = [
+            ({"size": 1, "location_type": "X"}, "programmes.UMEP.shortlist.location_type must be one of: R, D, W, V."),
+            ({"size": 1, "per_city": {"Zomba": 1}}, "programmes.UMEP.shortlist needs either size (one overall "
+                                                    "shortlist) or per_city (places per city), not both."),
+            ({"size": 1, "city": {"field": "biz_city", "location_type": "R"}},
+             "programmes.UMEP.shortlist.city is only used with per_city."),
+            ({"per_city": {"Zomba": 1}, "city": {"field": "biz_city"}},
+             "programmes.UMEP.shortlist.city.location_type must be one of: R, D, W, V."),
+        ]
+        for shortlist, message in cases:
+            with self.subTest(shortlist=shortlist), self.assertRaises(ValidationError) as exc:
+                validate_programmes({"UMEP": {**RULES, "shortlist": shortlist}})
+            self.assertIn(message, exc.exception.messages)
 
 
 class ScoringApiTest(openIMISGraphQLTestCase):
@@ -273,7 +337,7 @@ class ScoringApiTest(openIMISGraphQLTestCase):
             'items(kind: "SCORE") { uuid key points maxPoints label } } } } }',
             variables={"id": str(self.appraisal.id)}, headers={"HTTP_AUTHORIZATION": f"Bearer {self.token}"})
         node = json.loads(response.content)["data"]["appraisal"]["edges"][0]["node"]
-        self.assertEqual((node["status"], node["score"]), ("SCORED", "75.00"))
+        self.assertEqual((node["status"], node["score"]), ("SCORED", None))
         market = next(item for item in node["items"] if item["key"] == "stable_market")
         self.assertEqual((market["maxPoints"], market["label"]), ("25", "Availability of stable market"))
 
@@ -284,3 +348,6 @@ class ScoringApiTest(openIMISGraphQLTestCase):
 
         appraisal = Appraisal.objects.get(id=self.appraisal.id)
         self.assertEqual((appraisal.score, appraisal.status, appraisal.rank), (Decimal("100.00"), "SHORTLISTED", 1))
+        self.send_mutation_raw('mutation { closeShortlist(input: {programme: "UMEP", round: "2026-R1"}) '
+                               '{ internalId } }', self.token)
+        self.assertEqual(Appraisal.objects.get(id=self.appraisal.id).stage, "CLOSED")

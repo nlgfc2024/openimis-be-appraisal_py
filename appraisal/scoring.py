@@ -4,21 +4,21 @@
   score input through enrolment's scoring rules (``component_points``), so appraisal and enrolment score alike.
   A missing or unreadable input leaves the component without points until an officer sets them, so the total stays
   empty and the shortlist can't run with it.
-- An officer may set a component's points (from 0 to its maximum) with the evidence checked.
+- An officer corrects a component's value (the answer, as the evidence shows it) with the evidence checked; the
+  points follow from the same scoring rules, so they never depart from the rubric.
 - The total weighs each component's points by ``weight / maximum points`` and scales the sum to ``normalise_to``,
   as enrolment's weighted score does. With UMEP's weights equal to the maximum points it is the plain sum.
 - Rescoring refreshes the system points under the appraisal's rules; an officer's points stay, and a component
   whose basis changed under them is flagged ``basis_changed``.
 - The shortlist ranks the scored appraisals of a programme round by score (highest first), then submission time
-  (earliest first), and marks the top ``per_city`` places of each city, or the top ``size`` overall, SHORTLISTED and
-  the rest NOT_SHORTLISTED. The city is the business location's answer (``shortlist.city``) or else the individual's
-  location; an applicant whose city has no places stops the shortlist. All appraisals of the round must hold the
-  same shortlist rules. With ``shortlist.individual_field`` the outcome is also written to the individual, through
-  the individual service, for field validation to select from.
+  (earliest first), and fills the round's ``places`` with enrolment's selector: the ``selection_strategy`` quotas
+  (e.g. per business city, with ``location_code`` conditions) in order, then, with ``spillover``, the next ranked.
+  Its rules are the round's, read from the current configuration. Each appraisal is ranked within the first quota it
+  matches (``json_ext.shortlist_group``). With ``shortlist.individual_field`` the outcome is also written to the
+  individual, through the individual service, for field validation and enrolment to select from.
 - Closing the shortlist makes the round's outcome final: its appraisals move to stage CLOSED and the shortlist
   can't be run for the round again.
 """
-import json
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.core.exceptions import ValidationError
@@ -31,10 +31,12 @@ Kind, Stage, Status = AppraisalItem.Kind, Appraisal.Stage, Appraisal.Status
 
 SCORE_INPUTS = "score_inputs"
 SHORTLIST_LOG = "shortlist"
+SHORTLIST_GROUP = "shortlist_group"
+# An officer's corrected value of a score item, in its json_ext; its points are the officer points
+OFFICER_VALUE = "officer_value"
 SCORABLE = (Status.ELIGIBLE, Status.SCORED)
 RANKED = (Status.SCORED, Status.SHORTLISTED, Status.NOT_SHORTLISTED)
 OUTCOMES = (Status.SHORTLISTED, Status.NOT_SHORTLISTED)
-DEFAULT_CITY_LOCATION_TYPE = "R"
 CENT = Decimal("0.01")
 
 
@@ -132,8 +134,9 @@ def score_round(user, programme, round, ids=None):
 
 
 @transaction.atomic
-def answer_score(user, item_id, points, evidence="", comment=""):
-    """Record the officer's points for one score component; returns the item."""
+def answer_score(user, item_id, value, evidence="", comment=""):
+    """Record the officer's corrected value for one score component; its points follow from the component's
+    scoring rules. Returns the item."""
     item = AppraisalItem.objects.filter(id=item_id, kind=Kind.SCORE, is_deleted=False).first()
     if item is None:
         raise ValidationError("appraisal.item_not_found")
@@ -143,22 +146,18 @@ def answer_score(user, item_id, points, evidence="", comment=""):
         raise ValidationError("appraisal.not_found")
     if appraisal.status != Status.SCORED:
         raise ValidationError(f"appraisal.not_scorable: the appraisal is {appraisal.get_status_display().lower()}")
-    from enrolment.ranking import maximum_points
-
     component = components(appraisal).get(item.key)
     if component is None:
         raise ValidationError("appraisal.item_not_found")
-    highest = _points(maximum_points(component["scoring"]))
-    try:
-        points = _points(points)
-    except (ArithmeticError, TypeError, ValueError):
-        raise ValidationError("appraisal.invalid_points")
-    if not Decimal(0) <= points <= highest:
-        raise ValidationError(f"appraisal.invalid_points: from 0 to {highest}")
+    value = str(value if value is not None else "").strip()
+    points, basis = system_points(component, value or None)
+    if points is None:
+        raise ValidationError(f"appraisal.invalid_value: {basis.get('note') or value}")
     evidence, comment = (evidence or "").strip(), (comment or "").strip()
     if not evidence:
         raise ValidationError("appraisal.evidence_required: record the evidence or source checked")
     item.officer_points, item.evidence, item.comment = points, evidence, comment
+    item.json_ext = {**(item.json_ext or {}), OFFICER_VALUE: value}
     item.decided_by, item.decided_at, item.basis_changed = user, timezone.now(), False
     item.save(user=user)
     appraisal.score = total(appraisal, _score_items(appraisal))
@@ -166,53 +165,60 @@ def answer_score(user, item_id, points, evidence="", comment=""):
     return item
 
 
-def _round_rules(appraisals):
-    """The shortlist rules the round's appraisals hold; refused when their snapshots disagree."""
-    rules = {json.dumps((a.config_snapshot or {}).get("shortlist") or {}, sort_keys=True) for a in appraisals}
-    if len(rules) > 1:
-        raise ValidationError("appraisal.shortlist_rules_differ: the round's appraisals were created under "
-                              "different shortlist rules; settle them before shortlisting")
-    return json.loads(rules.pop())
+def round_rules(programme, round):
+    """The shortlist rules of ``programme``'s ``round`` from the current configuration: they belong to the round,
+    not to each appraisal. Refused when the programme no longer configures that round or has no shortlist."""
+    from appraisal.apps import AppraisalConfig
+
+    AppraisalConfig.check_configured()
+    config = AppraisalConfig.programme(programme)
+    if not config or config.get("round") != round:
+        raise ValidationError(f"appraisal.round_not_configured: {programme} is not configured for round {round}")
+    rules = config.get("shortlist")
+    if not rules:
+        raise ValidationError("appraisal.no_shortlist_rule: set the programme's shortlist places")
+    return rules
 
 
-def _ancestor_name(location, location_type):
-    while location is not None and location.type != location_type:
-        location = location.parent
-    return location.name if location is not None else None
+def _order(appraisal):
+    """Best first: score, then submission time and Kobo id, so ties never depend on row order."""
+    submitted = (appraisal.submission.submitted_at if appraisal.submission_id else None) or appraisal.date_created
+    kobo = appraisal.submission.kobo_id if appraisal.submission_id else 0
+    return -appraisal.score, submitted.timestamp() if submitted else 0, kobo, str(appraisal.id)
 
 
-def _city_finder(rules):
-    """appraisal -> the name of its city: the location answered to ``city.field`` (a ``city.location_type`` code,
-    followed to its current code) or else the individual's location, up to its ``location_type`` ancestor."""
-    from location.models import Location
+def _allocate(appraisals, rules):
+    """Fill the round's places with enrolment's selector. Returns (selected individual ids, groups, group of each
+    appraisal), the groups [{"group", "places", "ranked", "shortlisted"}] per quota then the places left over
+    (group None)."""
+    from enrolment.ranking import allocate_places, normalise_selection_strategy, quota_members
+    from individual.models import Individual
 
-    group_type = rules.get("location_type", DEFAULT_CITY_LOCATION_TYPE)
-    city = rules.get("city")
-    cache = {}
+    places = rules["places"]
+    ranked = [appraisal.individual_id for appraisal in appraisals]
+    strategy = rules.get("selection_strategy")
+    if strategy:
+        strategy = normalise_selection_strategy(strategy, Individual)
+        quotas, spillover = strategy["quotas"], strategy["spillover"]
+        members = quota_members(Individual.objects.filter(id__in=ranked), quotas)
+    else:
+        quotas, spillover, members = [], True, {}
+    selected, fill = allocate_places(ranked, quotas, members, places, spillover)
 
-    def by_answer(appraisal):
-        from msr_etl.location_file import current_location_code
+    # Each appraisal belongs to the first quota it matches, else to the places left over
+    def first_quota(appraisal):
+        return next((quota["key"] for quota in quotas if appraisal.individual_id in members[quota["key"]]), None)
 
-        code = (appraisal.individual.json_ext or {}).get(city["field"])
-        if code in (None, ""):
-            return None
-        key = str(code).strip()
-        if key not in cache:
-            current = current_location_code(city["location_type"], key)
-            location = Location.objects.filter(code=current, type=city["location_type"], validity_to__isnull=True) \
-                .first()
-            cache[key] = _ancestor_name(location, group_type)
-        return cache[key]
-
-    def by_residence(appraisal):
-        location = appraisal.individual.location
-        if location is None:
-            return None
-        if location.id not in cache:
-            cache[location.id] = _ancestor_name(location, group_type)
-        return cache[location.id]
-
-    return by_answer if city else by_residence
+    group_of = {appraisal.id: first_quota(appraisal) for appraisal in appraisals}
+    groups = [{"group": bucket["key"], "places": bucket["reserved"],
+               "ranked": sum(1 for group in group_of.values() if group == bucket["key"]),
+               "shortlisted": bucket["filled"]} for bucket in fill["buckets"]]
+    outside = sum(1 for group in group_of.values() if group is None)
+    left = places - sum(bucket["reserved"] for bucket in fill["buckets"])
+    if outside or (spillover and left):
+        groups.append({"group": None, "places": left if spillover else 0, "ranked": outside,
+                       "shortlisted": fill["unreserved"]})
+    return set(selected), groups, group_of
 
 
 def _check_round_open(programme, round):
@@ -224,11 +230,12 @@ def _check_round_open(programme, round):
 
 @transaction.atomic
 def shortlist_round(user, programme, round):
-    """Rank the round's scored appraisals and shortlist the top places, by city when configured.
+    """Rank the round's scored appraisals and shortlist its places, by quota (e.g. per city) when configured.
 
-    Returns {group: {"places", "ranked", "shortlisted"}}; the group is the city, or None for an overall shortlist.
+    Returns {group: {"places", "ranked", "shortlisted"}}; the group is the quota key, or None for the other places.
     """
     _check_round_open(programme, round)
+    rules = round_rules(programme, round)
     pending = Appraisal.objects.filter(programme=programme, round=round, status=Status.ELIGIBLE, is_deleted=False)
     for appraisal in _locked(pending):
         score_appraisal(appraisal, user)
@@ -245,47 +252,26 @@ def shortlist_round(user, programme, round):
     if unscored:
         raise ValidationError(f"appraisal.scores_missing: {len(unscored)} appraisals without a score")
 
-    rules = _round_rules(appraisals)
-    per_city, size = rules.get("per_city"), rules.get("size")
-    if not per_city and not size:
-        raise ValidationError("appraisal.no_shortlist_rule: set shortlist.size or shortlist.per_city")
-    groups = {}
-    if per_city:
-        city_of = _city_finder(rules)
-        for appraisal in appraisals:
-            groups.setdefault(city_of(appraisal), []).append(appraisal)
-        unplaced = {city: len(members) for city, members in groups.items() if city not in per_city}
-        if unplaced:
-            listed = ", ".join(f"{city or 'no city'} ({count})" for city, count in sorted(
-                unplaced.items(), key=lambda entry: str(entry[0])))
-            raise ValidationError(f"appraisal.city_without_places: {listed}; places are set for "
-                                  f"{', '.join(per_city)}")
-    else:
-        groups[None] = appraisals
-
-    def order(appraisal):
-        submitted = (appraisal.submission.submitted_at if appraisal.submission_id else None) or appraisal.date_created
-        kobo = appraisal.submission.kobo_id if appraisal.submission_id else 0
-        return -appraisal.score, submitted.timestamp() if submitted else 0, kobo, str(appraisal.id)
-
-    summary = {}
-    for group, members in groups.items():
-        places = per_city[group] if per_city else size
-        members.sort(key=order)
-        for position, appraisal in enumerate(members, start=1):
-            _set_shortlisted(appraisal, position, position <= places, rules.get("individual_field"), user)
-        summary[group] = {"places": places, "ranked": len(members), "shortlisted": min(places, len(members))}
-    log = {"by": user.username, "at": timezone.now().isoformat(),
-           "groups": [{"group": group, **counts} for group, counts in summary.items()]}
+    appraisals.sort(key=_order)
+    selected, groups, group_of = _allocate(appraisals, rules)
+    positions = {}
+    for appraisal in appraisals:
+        group = group_of[appraisal.id]
+        positions[group] = positions.get(group, 0) + 1
+        _set_shortlisted(appraisal, positions[group], appraisal.individual_id in selected, group,
+                         rules.get("individual_field"), user)
+    log = {"by": user.username, "at": timezone.now().isoformat(), "groups": groups}
     for appraisal in appraisals:
         appraisal.json_ext = {**(appraisal.json_ext or {}), SHORTLIST_LOG: log}
         appraisal.save(user=user)
-    return summary
+    return {group["group"]: {key: group[key] for key in ("places", "ranked", "shortlisted")} for group in groups}
 
 
-def _set_shortlisted(appraisal, rank, shortlisted, individual_field, user):
+def _set_shortlisted(appraisal, rank, shortlisted, group, individual_field, user):
     status = Status.SHORTLISTED if shortlisted else Status.NOT_SHORTLISTED
     appraisal.status, appraisal.stage, appraisal.rank = status, Stage.SHORTLISTING, rank
+    # The quota (e.g. the city) the appraisal was ranked in, for the ranking screen; None for the other places
+    appraisal.json_ext = {**(appraisal.json_ext or {}), SHORTLIST_GROUP: group}
     if individual_field:
         _record_on_individual(appraisal.individual, individual_field, status, user)
 

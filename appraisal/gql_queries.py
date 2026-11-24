@@ -28,6 +28,7 @@ class AppraisalItemGQLType(DjangoObjectType):
     basis = graphene.JSONString()
     decided_by = graphene.String(description="Username of the officer who answered")
     max_points = graphene.Decimal(description="The most points a score item can give")
+    officer_value = graphene.String(description="A score item's value as an officer corrected it")
 
     class Meta:
         model = AppraisalItem
@@ -55,6 +56,11 @@ class AppraisalItemGQLType(DjangoObjectType):
 
     def resolve_decided_by(self, info):
         return self.decided_by.username if self.decided_by_id else None
+
+    def resolve_officer_value(self, info):
+        from appraisal.scoring import OFFICER_VALUE
+
+        return (self.json_ext or {}).get(OFFICER_VALUE)
 
     def resolve_max_points(self, info):
         if self.kind != AppraisalItem.Kind.SCORE:

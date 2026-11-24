@@ -1,18 +1,19 @@
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from appraisal import review, scoring
+from appraisal.apps import AppraisalConfig
 from appraisal.config import validate_programmes
 from appraisal.models import Appraisal, AppraisalItem
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_admin_role, create_test_interactive_user
 from individual.models import Individual
 from individual.tests.test_helpers import create_individual
-from location.models import Location
 from msr_etl.models import KoboSubmission
 
 # The Annex 2B rubric as configured for UMEP (coremis-configs appraisal/umep.appraisal.config.json)
@@ -39,25 +40,31 @@ BEST = {"months_in_operation": 30, "turnover_past_12m_mwk": "6000000", "has_busi
         "jobs_to_create": "12", "has_bank_statement": True, "market_stability": "stable"}
 RULES = {"source_types": ["kobo"], "round": "2026-R1",
          "eligibility": [{"key": "youth_age", "label": "Youth aged 18-35"}], "scoring": UMEP_SCORING,
-         "shortlist": {"size": 3}}
+         "shortlist": {"places": 3}}
 SUBMITTED = datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc)
 
 
-def city_village(name):
-    """A village under a city (type R) called ``name``."""
-    city = Location.objects.filter(type="R", name=name, validity_to__isnull=True).first() or \
-        Location.objects.create(type="R", code=f"T{name[:6]}", name=name, audit_user_id=-1)
-    place = city
-    for kind in ("D", "W", "V"):
-        place = Location.objects.create(type=kind, code=f"{city.code}{kind}{Location.objects.count()}",
-                                        name=f"{name} {kind}", parent=place, audit_user_id=-1)
-    return place
+def city_quota(key, code, count):
+    """A quota of ``count`` places for applicants whose business city (``biz_city``) is ``code``."""
+    return {"key": key, "count": count,
+            "when": [{"derived": "location_code", "answer": "biz_city", "location_type": "R", "value": code}]}
+
+
+def configure(test, rules):
+    """Run ``test`` with ``rules`` as UMEP's current configuration (the shortlist reads the round's rules there)."""
+    for target, value in (("programmes", {"UMEP": rules}), ("config_error", None)):
+        patcher = patch.object(AppraisalConfig, target, value)
+        patcher.start()
+        test.addCleanup(patcher.stop)
 
 
 class ScoringTestCase(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.user = create_test_interactive_user(username="appraisalScorer", roles=[create_admin_role().id])
+
+    def setUp(self):
+        configure(self, RULES)
 
     def _eligible(self, inputs=None, rules=RULES, location=None, minutes=0, kobo_id=None, answers=None):
         """An eligible appraisal with these score inputs and an application submitted ``minutes`` after SUBMITTED."""
@@ -140,27 +147,30 @@ class ScoreTest(ScoringTestCase):
 
 class OfficerScoreTest(ScoringTestCase):
     def setUp(self):
+        super().setUp()
         self.appraisal = scoring.score_appraisal(self._eligible({"market_stability": None}), self.user)
         self.market = self._items(self.appraisal)["stable_market"]
 
-    def test_an_officer_sets_points_with_evidence_and_the_total_follows(self):
+    def test_an_officer_corrects_the_value_and_the_points_follow(self):
         self.assertIsNone(self.appraisal.score)
-        item = scoring.answer_score(self.user, self.market.id, "12", "Site visit: seasonal sales")
+        item = scoring.answer_score(self.user, self.market.id, " irregular ", "Site visit: seasonal sales")
 
         self.appraisal.refresh_from_db()
-        self.assertEqual((item.officer_points, item.points, item.decided_by_id), (12, 12, self.user.id))
+        self.assertEqual((item.officer_points, item.points, item.json_ext["officer_value"], item.decided_by_id),
+                         (12, 12, "irregular", self.user.id))
         self.assertEqual(self.appraisal.score, Decimal("87.00"))
 
-    def test_points_must_be_within_the_component_and_evidenced(self):
-        for points, evidence, message in (("26", "x", "appraisal.invalid_points: from 0 to 25.00"),
-                                          ("-1", "x", "appraisal.invalid_points"),
-                                          ("abc", "x", "appraisal.invalid_points"),
-                                          ("12", " ", "appraisal.evidence_required")):
-            with self.subTest(points=points), self.assertRaisesMessage(ValidationError, message):
-                scoring.answer_score(self.user, self.market.id, points, evidence)
+    def test_the_value_must_be_scorable_and_evidenced(self):
+        duration = self._items(self.appraisal)["operation_duration"]
+        for item, value, evidence, message in (
+                (duration, "a year", "x", "appraisal.invalid_value: 'a year' can't be scored"),
+                (duration, " ", "x", "appraisal.invalid_value: No answer"),
+                (self.market, "stable", " ", "appraisal.evidence_required")):
+            with self.subTest(value=value), self.assertRaisesMessage(ValidationError, message):
+                scoring.answer_score(self.user, item.id, value, evidence)
 
     def test_rescoring_keeps_the_officer_points_and_flags_a_changed_basis(self):
-        scoring.answer_score(self.user, self.market.id, "12", "Site visit")
+        scoring.answer_score(self.user, self.market.id, "irregular", "Site visit")
         Appraisal.objects.filter(id=self.appraisal.id).update(
             json_ext={"score_inputs": {**BEST, "market_stability": "stable"}})
         self.appraisal.refresh_from_db()
@@ -187,8 +197,8 @@ class ShortlistTest(ScoringTestCase):
 
     def test_the_top_three_of_five_are_shortlisted_ties_by_submission_time(self):
         jobs = {0: "12", 1: "6", 2: "12", 3: "3", 4: "1"}
-        rules = {**RULES, "shortlist": {"size": 3, "individual_field": "umep_desk_appraisal_status"}}
-        appraisals = [self._eligible({"jobs_to_create": jobs[i]}, rules=rules, minutes=10 - i) for i in range(5)]
+        configure(self, {**RULES, "shortlist": {"places": 3, "individual_field": "umep_desk_appraisal_status"}})
+        appraisals = [self._eligible({"jobs_to_create": jobs[i]}, minutes=10 - i) for i in range(5)]
         scoring.score_round(self.user, "UMEP", "2026-R1")
 
         summary = scoring.shortlist_round(self.user, "UMEP", "2026-R1")
@@ -202,47 +212,46 @@ class ShortlistTest(ScoringTestCase):
                          "NOT_SHORTLISTED")
         self.assertEqual(Appraisal.objects.get(id=appraisals[0].id).stage, "SHORTLISTING")
 
-    def test_each_city_has_its_own_places(self):
-        rules = {**RULES, "shortlist": {"per_city": {"Blantyre": 2, "Zomba": 3}}}
-        blantyre, zomba, mzuzu = city_village("Blantyre"), city_village("Zomba"), city_village("Mzuzu")
-        b = [self._eligible({"jobs_to_create": str(12 - i)}, rules=rules, location=blantyre, minutes=i)
-             for i in range(3)]
-        z = [self._eligible(rules=rules, location=zomba, minutes=i) for i in range(2)]
+    def test_each_business_city_has_its_own_places(self):
+        quotas = [city_quota("blantyre", "325", 2), city_quota("zomba", "ZA", 3)]
+        configure(self, {**RULES, "shortlist": {"places": 5, "selection_strategy": {
+            "source": "SELF", "spillover": False, "quotas": quotas}}})
+        b = [self._eligible({"jobs_to_create": str(12 - i)}, minutes=i, answers={"biz_city": "325"}) for i in range(3)]
+        z = [self._eligible(minutes=i, answers={"biz_city": "ZA"}) for i in range(2)]
+        elsewhere = self._eligible(answers={"biz_city": "MZ"})
 
         summary = scoring.shortlist_round(self.user, "UMEP", "2026-R1")
 
-        self.assertEqual(summary, {"Blantyre": {"places": 2, "ranked": 3, "shortlisted": 2},
-                                   "Zomba": {"places": 3, "ranked": 2, "shortlisted": 2}})
+        self.assertEqual(summary, {"blantyre": {"places": 2, "ranked": 3, "shortlisted": 2},
+                                   "zomba": {"places": 3, "ranked": 2, "shortlisted": 2},
+                                   None: {"places": 0, "ranked": 1, "shortlisted": 0}})
         self.assertEqual(self._statuses(b), [("SHORTLISTED", 1), ("SHORTLISTED", 2), ("NOT_SHORTLISTED", 3)])
         self.assertEqual(self._statuses(z), [("SHORTLISTED", 1), ("SHORTLISTED", 2)])
-        self.assertNotIn("umep_desk_appraisal_status", Individual.objects.get(id=b[0].individual_id).json_ext or {})
+        self.assertEqual(self._statuses([elsewhere]), [("NOT_SHORTLISTED", 1)])
+        self.assertEqual(Appraisal.objects.get(id=b[0].id).json_ext["shortlist_group"], "blantyre")
+        self.assertNotIn("umep_desk_appraisal_status", Individual.objects.get(id=b[0].individual_id).json_ext)
 
-        self._eligible(rules=rules, location=mzuzu)
-        self._eligible(rules=rules)
-        with self.assertRaisesMessage(ValidationError, "appraisal.city_without_places: Mzuzu (1), no city (1); "
-                                                       "places are set for Blantyre, Zomba"):
-            scoring.shortlist_round(self.user, "UMEP", "2026-R1")
-
-    def test_places_can_go_by_the_business_city(self):
-        rules = {**RULES, "shortlist": {"per_city": {"Blantyre": 1, "Zomba": 1},
-                                        "city": {"field": "biz_city", "location_type": "R"}}}
-        blantyre, zomba = city_village("Blantyre"), city_village("Zomba")
-        blantyre_code = blantyre.parent.parent.parent.code
-        # Both live in Zomba; the one with a Blantyre business takes Blantyre's place
-        in_blantyre = self._eligible(rules=rules, location=zomba, answers={"biz_city": blantyre_code})
-        in_zomba = self._eligible({"jobs_to_create": "1"}, rules=rules, location=zomba,
-                                  answers={"biz_city": zomba.parent.parent.parent.code})
+    def test_with_spillover_unfilled_places_go_to_the_next_ranked(self):
+        configure(self, {**RULES, "shortlist": {"places": 3, "selection_strategy": {
+            "source": "SELF", "quotas": [city_quota("zomba", "ZA", 2)]}}})
+        in_zomba = self._eligible(answers={"biz_city": "ZA"})
+        others = [self._eligible(minutes=i, answers={"biz_city": "325"}) for i in range(3)]
 
         summary = scoring.shortlist_round(self.user, "UMEP", "2026-R1")
 
-        self.assertEqual(summary, {"Blantyre": {"places": 1, "ranked": 1, "shortlisted": 1},
-                                   "Zomba": {"places": 1, "ranked": 1, "shortlisted": 1}})
-        self.assertEqual(self._statuses([in_blantyre, in_zomba]), [("SHORTLISTED", 1), ("SHORTLISTED", 1)])
+        self.assertEqual(summary, {"zomba": {"places": 2, "ranked": 1, "shortlisted": 1},
+                                   None: {"places": 1, "ranked": 3, "shortlisted": 2}})
+        self.assertEqual(self._statuses([in_zomba, *others]),
+                         [("SHORTLISTED", 1), ("SHORTLISTED", 1), ("SHORTLISTED", 2), ("NOT_SHORTLISTED", 3)])
 
-    def test_appraisals_under_different_shortlist_rules_block_the_shortlist(self):
+    def test_the_rules_are_the_rounds_in_the_current_configuration(self):
         self._eligible()
-        self._eligible(rules={**RULES, "shortlist": {"size": 5}})
-        with self.assertRaisesMessage(ValidationError, "appraisal.shortlist_rules_differ"):
+        configure(self, {**RULES, "round": "2026-R2"})
+        with self.assertRaisesMessage(ValidationError, "appraisal.round_not_configured: UMEP is not configured for "
+                                                       "round 2026-R1"):
+            scoring.shortlist_round(self.user, "UMEP", "2026-R1")
+        configure(self, {key: value for key, value in RULES.items() if key != "shortlist"})
+        with self.assertRaisesMessage(ValidationError, "appraisal.no_shortlist_rule"):
             scoring.shortlist_round(self.user, "UMEP", "2026-R1")
 
     def test_a_closed_shortlist_is_final(self):
@@ -296,17 +305,15 @@ class ScoringConfigTest(TestCase):
             validate_programmes({"UMEP": bad})
         self.assertIn("programmes.UMEP.scoring.components[0].scoring.bands must be a non-empty list.",
                       exc.exception.messages)
+        strategy = {"source": "SELF", "spillover": False, "quotas": [city_quota("zomba", "ZA", 1)]}
         validate_programmes({"UMEP": {**RULES, "shortlist": {
-            "per_city": {"Zomba": 1}, "location_type": "R", "city": {"field": "biz_city", "location_type": "R"},
-            "individual_field": "umep_desk_appraisal_status"}}})
+            "places": 1, "selection_strategy": strategy, "individual_field": "umep_desk_appraisal_status"}}})
         cases = [
-            ({"size": 1, "location_type": "X"}, "programmes.UMEP.shortlist.location_type must be one of: R, D, W, V."),
-            ({"size": 1, "per_city": {"Zomba": 1}}, "programmes.UMEP.shortlist needs either size (one overall "
-                                                    "shortlist) or per_city (places per city), not both."),
-            ({"size": 1, "city": {"field": "biz_city", "location_type": "R"}},
-             "programmes.UMEP.shortlist.city is only used with per_city."),
-            ({"per_city": {"Zomba": 1}, "city": {"field": "biz_city"}},
-             "programmes.UMEP.shortlist.city.location_type must be one of: R, D, W, V."),
+            ({}, "programmes.UMEP.shortlist.places must be a positive whole number: the round's shortlist places."),
+            ({"places": 1, "per_city": {"Zomba": 1}}, "programmes.UMEP.shortlist has unsupported keys: per_city."),
+            ({"places": 1, "selection_strategy": {**strategy, "spillover": "no"}},
+             "programmes.UMEP.shortlist.selection_strategy: enrolment_ranking.selection_strategy.spillover must be "
+             "true or false."),
         ]
         for shortlist, message in cases:
             with self.subTest(shortlist=shortlist), self.assertRaises(ValidationError) as exc:
@@ -323,6 +330,7 @@ class ScoringApiTest(openIMISGraphQLTestCase):
 
     def setUp(self):
         super().setUp()
+        configure(self, RULES)
         individual = create_individual(self.admin.username)
         self.appraisal = Appraisal(individual=individual, programme="UMEP", round="2026-R1", config_snapshot=RULES,
                                    status="ELIGIBLE", stage="DESK_SCORING", eligibility="ELIGIBLE",
@@ -341,7 +349,7 @@ class ScoringApiTest(openIMISGraphQLTestCase):
         market = next(item for item in node["items"] if item["key"] == "stable_market")
         self.assertEqual((market["maxPoints"], market["label"]), ("25", "Availability of stable market"))
 
-        self.send_mutation_raw(f'mutation {{ answerAppraisalScore(input: {{id: "{market["uuid"]}", points: "25", '
+        self.send_mutation_raw(f'mutation {{ answerAppraisalScore(input: {{id: "{market["uuid"]}", value: "stable", '
                                f'evidence: "Customer records"}}) {{ internalId }} }}', self.token)
         self.send_mutation_raw('mutation { shortlistAppraisals(input: {programme: "UMEP", round: "2026-R1"}) '
                                '{ internalId } }', self.token)

@@ -109,6 +109,9 @@ class AppraisalGQLType(DjangoObjectType):
     can_screen = graphene.Boolean(description="The user may answer the checklist now")
     can_decide = graphene.Boolean(description="The user may record the eligibility decision now")
     can_reopen = graphene.Boolean(description="The user may reopen the recorded decision")
+    can_score = graphene.Boolean(description="The user may correct a score item's value now")
+    can_rescore = graphene.Boolean(description="The user may (re)score the appraisal now")
+    shortlist_group = graphene.String(description="The quota the last shortlist ranked it in (e.g. its city), or null")
     items = graphene.List(AppraisalItemGQLType, kind=graphene.String(),
                           description="Active items, in the order of the appraisal's rules")
     history = graphene.List(AppraisalChangeGQLType, description="Changes to the appraisal and its items, newest first")
@@ -149,6 +152,19 @@ class AppraisalGQLType(DjangoObjectType):
         from appraisal.review import decision_preview
 
         return _can_screen(self, info) and decision_preview(self)["problem"] is None
+
+    def resolve_can_score(self, info):
+        return _allowed(info, "gql_mutation_score_appraisal_perms") and self.status == Appraisal.Status.SCORED
+
+    def resolve_can_rescore(self, info):
+        from appraisal.scoring import SCORABLE
+
+        return _allowed(info, "gql_mutation_score_appraisal_perms") and self.status in SCORABLE
+
+    def resolve_shortlist_group(self, info):
+        from appraisal.scoring import SHORTLIST_GROUP
+
+        return (self.json_ext or {}).get(SHORTLIST_GROUP)
 
     def resolve_can_reopen(self, info):
         from appraisal.review import REOPENABLE
@@ -191,3 +207,11 @@ def _changes(records, subject):
 
 def _plain(value):
     return value if value is None or isinstance(value, (str, int, float, bool, dict, list)) else str(value)
+
+
+class AppraisalRoundGQLType(graphene.ObjectType):
+    """A programme round: the one configured now, or one with appraisals the user may see."""
+    programme = graphene.String()
+    round = graphene.String()
+    configured = graphene.Boolean(description="The programme's current round in the configuration")
+    appraisals = graphene.Int(description="Appraisals of the round the user may see")

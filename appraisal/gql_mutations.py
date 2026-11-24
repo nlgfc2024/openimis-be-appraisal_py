@@ -6,7 +6,7 @@ from django.utils.translation import gettext as _
 from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
 
-from appraisal import review
+from appraisal import review, scoring
 from appraisal.apps import AppraisalConfig
 
 
@@ -58,3 +58,60 @@ class DecideAppraisalEligibilityMutation(BaseMutation):
     @classmethod
     def _mutate(cls, user, **data):
         review.decide_eligibility(user, data["id"], data.get("comment", ""))
+
+
+class ScoreAppraisalsMutation(BaseMutation):
+    """Score (or rescore) the eligible appraisals of a programme round, or only ``ids`` (Annex 2B)."""
+    _mutation_class = "ScoreAppraisalsMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        programme = graphene.String(required=True)
+        round = graphene.String(required=True)
+        ids = graphene.List(graphene.UUID, description="Only these appraisals")
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_score_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.score_round(user, data["programme"], data["round"], data.get("ids"))
+
+
+class AnswerAppraisalScoreMutation(BaseMutation):
+    """An officer's points for one score component."""
+    _mutation_class = "AnswerAppraisalScoreMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True, description="The score item")
+        points = graphene.Decimal(required=True)
+        evidence = graphene.String(required=True, description="Evidence or source checked")
+        comment = graphene.String()
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_score_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.answer_score(user, data["id"], data["points"], data.get("evidence", ""), data.get("comment", ""))
+
+
+class ShortlistAppraisalsMutation(BaseMutation):
+    """Rank a programme round's scored appraisals and shortlist the top places."""
+    _mutation_class = "ShortlistAppraisalsMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        programme = graphene.String(required=True)
+        round = graphene.String(required=True)
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_shortlist_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.shortlist_round(user, data["programme"], data["round"])

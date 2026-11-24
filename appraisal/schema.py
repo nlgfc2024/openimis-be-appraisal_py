@@ -8,7 +8,13 @@ from core.schema import OrderedDjangoFilterConnectionField
 from location.apps import LocationConfig
 
 from appraisal.apps import AppraisalConfig
-from appraisal.gql_mutations import AnswerAppraisalItemMutation, DecideAppraisalEligibilityMutation
+from appraisal.gql_mutations import (
+    AnswerAppraisalItemMutation,
+    AnswerAppraisalScoreMutation,
+    DecideAppraisalEligibilityMutation,
+    ScoreAppraisalsMutation,
+    ShortlistAppraisalsMutation,
+)
 from appraisal.gql_queries import AppraisalGQLType
 from appraisal.models import Appraisal
 
@@ -67,3 +73,6 @@ class Query(graphene.ObjectType):
 class Mutation(graphene.ObjectType):
     answer_appraisal_item = AnswerAppraisalItemMutation.Field()
     decide_appraisal_eligibility = DecideAppraisalEligibilityMutation.Field()
+    score_appraisals = ScoreAppraisalsMutation.Field()
+    answer_appraisal_score = AnswerAppraisalScoreMutation.Field()
+    shortlist_appraisals = ShortlistAppraisalsMutation.Field()

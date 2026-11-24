@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import graphene
 from graphene_django import DjangoObjectType
 
@@ -25,6 +27,7 @@ class AppraisalItemGQLType(DjangoObjectType):
     is_overridden = graphene.Boolean()
     basis = graphene.JSONString()
     decided_by = graphene.String(description="Username of the officer who answered")
+    max_points = graphene.Decimal(description="The most points a score item can give")
 
     class Meta:
         model = AppraisalItem
@@ -52,6 +55,14 @@ class AppraisalItemGQLType(DjangoObjectType):
 
     def resolve_decided_by(self, info):
         return self.decided_by.username if self.decided_by_id else None
+
+    def resolve_max_points(self, info):
+        if self.kind != AppraisalItem.Kind.SCORE:
+            return None
+        from enrolment.ranking import maximum_points
+
+        rule = _rules(self.appraisal, self.kind).get(self.key)
+        return Decimal(str(maximum_points(rule["scoring"]))) if rule else None
 
 
 class AppraisalChangeGQLType(graphene.ObjectType):

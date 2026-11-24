@@ -1,4 +1,8 @@
+import copy
+import json
 import logging
+import os
+from datetime import datetime
 
 from django.apps import AppConfig
 from django.core.exceptions import ValidationError
@@ -66,10 +70,8 @@ class AppraisalConfig(AppConfig):
                 setattr(cls, field, cfg[field])
 
     def ready(self):
-        from core.models import ModuleConfiguration
-
-        cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
-        self._load_config(cfg)
+        saved = _saved_config(self.name)
+        self._load_config({**copy.deepcopy(DEFAULT_CONFIG), **(saved or {})})
         register_validator(self.name, self._validate_module_config)
         from appraisal import receivers
 
@@ -91,3 +93,31 @@ class AppraisalConfig(AppConfig):
     def programme(cls, code):
         """The configuration of programme ``code``, or None when it isn't appraised."""
         return (cls.programmes or {}).get(code)
+
+
+def _saved_config(module):
+    """The saved configuration of ``module``; None when there is none, or no database yet. Unlike
+    ModuleConfiguration.get_or_default, a saved row that isn't a JSON object raises instead of falling back to the
+    defaults, so a broken configuration stops the module rather than quietly disabling its programmes."""
+    from django.db import DatabaseError
+    from django.db.models import Q
+
+    from core.models import ModuleConfiguration
+
+    if os.environ.get("NO_DATABASE"):
+        return None
+    try:
+        row = ModuleConfiguration.objects.filter(
+            Q(is_disabled_until=None) | Q(is_disabled_until__lt=datetime.now()), layer="be", module=module).first()
+    except DatabaseError:
+        # Core's tables don't exist yet (first migrate), as get_or_default allows
+        return None
+    if row is None:
+        return None
+    try:
+        saved = json.loads(row.config)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"The saved {module} configuration is not valid JSON: {exc}") from exc
+    if not isinstance(saved, dict):
+        raise ValidationError(f"The saved {module} configuration must be a JSON object.")
+    return saved

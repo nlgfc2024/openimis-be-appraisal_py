@@ -1,6 +1,7 @@
 import copy
 import importlib
 import json
+import os
 from unittest.mock import patch
 
 from django.apps import apps
@@ -93,6 +94,8 @@ class ProgrammeConfigTest(SimpleTestCase):
             (_with(["shortlist", "per_city", "Zomba"], 0),
              "programmes.UMEP.shortlist.per_city['Zomba'] must be a positive whole number of places."),
             (_with(["shortlist", "size"], True), "programmes.UMEP.shortlist.size must be a positive whole number."),
+            (_with(["shortlist", "per_city"], None),
+             "programmes.UMEP.shortlist.per_city must be a non-empty object of city: places."),
         ]
         for programmes, message in cases:
             with self.subTest(message=message):
@@ -142,6 +145,47 @@ class ModuleConfigurationSaveTest(TestCase):
             ModuleConfiguration(module="appraisal", layer="be", version="test",
                                 config=json.dumps({"programmes": {"UMEP": PROGRAMME}})).save()
         self.assertTrue(ModuleConfiguration.objects.filter(module="appraisal").exists())
+
+
+class ReadySavedConfigurationTest(TestCase):
+    """ready() reads the saved row itself: a row that isn't a JSON object stops the module."""
+
+    def setUp(self):
+        saved = {name: getattr(AppraisalConfig, name) for name in DEFAULT_CONFIG}
+        self.addCleanup(lambda: [setattr(AppraisalConfig, name, value) for name, value in saved.items()])
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("NO_DATABASE", None)
+        self.app = apps.get_app_config("appraisal")
+
+    def _store(self, config):
+        # Written as fixtures or QuerySet updates can, without the save-time check
+        row = ModuleConfiguration(module="appraisal", layer="be", version="test", config="{}")
+        ModuleConfiguration.objects.bulk_create([row])
+        ModuleConfiguration.objects.filter(module="appraisal").update(config=config)
+
+    def test_a_malformed_saved_row_stops_the_module(self):
+        for config, message in (("[]", "must be a JSON object"), ("null", "must be a JSON object"),
+                                ("{bad", "is not valid JSON")):
+            with self.subTest(config=config):
+                ModuleConfiguration.objects.filter(module="appraisal").delete()
+                self._store(config)
+                with self.assertRaisesMessage(ValidationError, message):
+                    self.app.ready()
+
+    def test_an_invalid_saved_programme_stops_the_module(self):
+        self._store(json.dumps({"programmes": {"UMEP": {"round": "R1"}}}))
+        with self.assertRaises(ValidationError):
+            self.app.ready()
+
+    def test_a_valid_saved_row_is_loaded_and_no_row_gives_the_defaults(self):
+        self._store(json.dumps({"programmes": {"UMEP": PROGRAMME}}))
+        self.app.ready()
+        self.assertEqual(AppraisalConfig.programme("UMEP")["round"], "2026-R1")
+        ModuleConfiguration.objects.filter(module="appraisal").delete()
+        self.app.ready()
+        self.assertEqual(AppraisalConfig.programmes, {})
 
 
 class RightCodesTest(SimpleTestCase):

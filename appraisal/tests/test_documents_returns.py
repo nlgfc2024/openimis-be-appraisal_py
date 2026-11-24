@@ -201,6 +201,10 @@ class DocumentsReturnsApiTest(openIMISGraphQLTestCase):
 
     def setUp(self):
         super().setUp()
+        # Whatever the database's saved configuration, these tests run as configured
+        configured = patch.object(AppraisalConfig, "config_error", None)
+        configured.start()
+        self.addCleanup(configured.stop)
         individual = create_individual(self.admin.username)
         submission = KoboSubmission.objects.create(source_type="kobo", asset_uid="aForm", kobo_id=77, data=ANSWERS,
                                                    individual=individual, status="IMPORTED")

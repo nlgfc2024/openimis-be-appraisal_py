@@ -12,11 +12,23 @@ PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs
 APPROVAL_KEYS = {"shortlist", "eligibility"}
 BREAKDOWN_KEYS = {"key", "label", "field"}
 ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "location_type"}
-LOCATION_TYPES = ("R", "D", "W", "V")
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
-SHORTLIST_KEYS = {"size", "per_city", "location_type", "city", "individual_field"}
-CITY_KEYS = {"field", "location_type"}
+SHORTLIST_KEYS = {"places", "selection_strategy", "individual_field"}
+# Rules of the whole round, read from the current configuration when used; an appraisal's snapshot keeps the rest
+ROUND_KEYS = {"shortlist", "approval", "report"}
+
+
+def applicant_rules(programme):
+    """The rules an appraisal keeps from when it was created: the programme's, less the round's (ROUND_KEYS)."""
+    return {key: value for key, value in (programme or {}).items() if key not in ROUND_KEYS}
+
+
+def location_types():
+    """The location types the location module is configured with (its location_types, e.g. R, D, W, V)."""
+    from location.apps import LocationConfig
+
+    return tuple(LocationConfig.location_types or ())
 
 
 def _is_number(value):
@@ -75,8 +87,8 @@ def _eligibility_item(errors, item, path):
         errors.append(f"{path}.check must be one of: {', '.join(sorted(CHECKS))}.")
     if strategy and check:
         errors.append(f"{path} has both a strategy and a check; use one.")
-    if "location_type" in item and item["location_type"] not in LOCATION_TYPES:
-        errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
+    if "location_type" in item and item["location_type"] not in location_types():
+        errors.append(f"{path}.location_type must be one of: {', '.join(location_types())}.")
     if "field" in item and not _is_text(item["field"]):
         errors.append(f"{path}.field must be a non-empty string.")
     if strategy is not None and "field" not in item:
@@ -167,38 +179,25 @@ def _documents(errors, documents, path):
 
 
 def _shortlist(errors, shortlist, path):
+    """``places`` for the round, optionally divided by enrolment's ``selection_strategy`` (its quotas, e.g. per
+    city, and ``spillover``), and the individual's ``individual_field`` that receives the outcome."""
     if not isinstance(shortlist, dict):
         errors.append(f"{path} must be an object.")
         return
     _unexpected(errors, shortlist, SHORTLIST_KEYS, path)
-    if ("size" in shortlist) == ("per_city" in shortlist):
-        errors.append(f"{path} needs either size (one overall shortlist) or per_city (places per city), not both.")
-    if "city" in shortlist:
-        city = shortlist["city"]
-        if "per_city" not in shortlist:
-            errors.append(f"{path}.city is only used with per_city.")
-        if not isinstance(city, dict):
-            errors.append(f"{path}.city must be an object with field and location_type.")
-        else:
-            _unexpected(errors, city, CITY_KEYS, f"{path}.city")
-            if not _is_text(city.get("field")):
-                errors.append(f"{path}.city.field must be the answer holding the business location code.")
-            if city.get("location_type") not in LOCATION_TYPES:
-                errors.append(f"{path}.city.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
+    if not _positive_int(shortlist.get("places")):
+        errors.append(f"{path}.places must be a positive whole number: the round's shortlist places.")
+    if "selection_strategy" in shortlist:
+        from django.core.exceptions import ValidationError as Invalid
+        from enrolment.ranking import normalise_selection_strategy
+        from individual.models import Individual
+
+        try:
+            normalise_selection_strategy(shortlist["selection_strategy"], Individual)
+        except Invalid as exc:
+            errors.extend(f"{path}.selection_strategy: {message}" for message in exc.messages)
     if "individual_field" in shortlist and not _is_text(shortlist["individual_field"]):
         errors.append(f"{path}.individual_field must be the name of the individual's json_ext field.")
-    if "location_type" in shortlist and shortlist["location_type"] not in LOCATION_TYPES:
-        errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
-    if "size" in shortlist and not _positive_int(shortlist["size"]):
-        errors.append(f"{path}.size must be a positive whole number.")
-    if "per_city" in shortlist:
-        per_city = shortlist["per_city"]
-        if not isinstance(per_city, dict) or not per_city:
-            errors.append(f"{path}.per_city must be a non-empty object of city: places.")
-        else:
-            for city, places in per_city.items():
-                if not _is_text(city) or not _positive_int(places):
-                    errors.append(f"{path}.per_city['{city}'] must be a positive whole number of places.")
 
 
 def _approval(errors, approval, path):

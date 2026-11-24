@@ -147,6 +147,12 @@ class ApplySubmissionTest(PrefillTestCase):
                                                     "note": "'pslc' is not one of: jce, msce"})
         self.assertEqual(items["legally_established"].basis, {"note": "Decided by an officer"})
 
+    def test_the_round_rules_are_not_kept_with_the_appraisal(self):
+        with patch.object(AppraisalConfig, "programmes", {"UMEP": {**PROGRAMME, "shortlist": {"size": 5}}}):
+            appraisal, _ = self._apply(self._submission())
+        self.assertNotIn("shortlist", appraisal.config_snapshot)
+        self.assertEqual(appraisal.config_snapshot["eligibility"], PROGRAMME["eligibility"])
+
     def test_a_missing_answer_is_pending_not_no(self):
         _, items = self._apply(self._submission(**{"applicant/highest_education": None}))
 

@@ -130,7 +130,9 @@ def decide_eligibility(user, appraisal_id, comment=""):
     appraisal = _locked_appraisal(appraisal_id, user)
     _check_open(appraisal)
     decision, results = _decision(appraisal)
-    if approval_required(appraisal.config_snapshot, ApprovalKind.ELIGIBILITY):
+    from appraisal.apps import AppraisalConfig
+
+    if approval_required(AppraisalConfig.programme(appraisal.programme), ApprovalKind.ELIGIBILITY):
         individual = appraisal.individual
         request_approval(user, ApprovalKind.ELIGIBILITY, appraisal.programme, appraisal.round,
                          {"decision": decision, "results": results, "comment": (comment or "").strip()},

@@ -10,7 +10,7 @@ from appraisal.config import validate_programmes
 from appraisal.models import Appraisal, AppraisalApproval, AppraisalItem
 from appraisal.reports import appraisal_report
 from appraisal.tests.test_review import RULES as CHECKLIST, make_appraisal
-from appraisal.tests.test_scoring import RULES, ScoringTestCase, city_village
+from appraisal.tests.test_scoring import RULES, ScoringTestCase, city_quota, configure
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.test_helpers import create_admin_role, create_test_interactive_user
 from individual.tests.test_helpers import create_individual
@@ -53,8 +53,9 @@ class ShortlistApprovalTest(ScoringTestCase):
         cls.supervisor = create_test_interactive_user(username="appraisalSupervisor", roles=[create_admin_role().id])
 
     def setUp(self):
-        self.appraisals = [scoring.score_appraisal(self._eligible({"jobs_to_create": str(jobs)},
-                                                                  rules=SHORTLIST_APPROVAL, minutes=jobs), self.user)
+        configure(self, SHORTLIST_APPROVAL)
+        self.appraisals = [scoring.score_appraisal(self._eligible({"jobs_to_create": str(jobs)}, minutes=jobs),
+                                                   self.user)
                            for jobs in (12, 6, 1, 3)]
 
     def _statuses(self):
@@ -127,7 +128,7 @@ class ShortlistApprovalTest(ScoringTestCase):
         self.assertEqual(self._statuses(), ["SCORED"] * 4)
 
     def test_without_approval_the_shortlist_applies_at_once(self):
-        Appraisal.objects.filter(id__in=[a.id for a in self.appraisals]).update(config_snapshot=RULES)
+        configure(self, RULES)
         scoring.shortlist_round(self.user, "UMEP", "2026-R1")
         self.assertFalse(AppraisalApproval.objects.exists())
         self.assertEqual(self._statuses().count("SHORTLISTED"), 3)
@@ -141,7 +142,7 @@ class DecisionApprovalTest(TestCase):
 
     def setUp(self):
         self.appraisal, self.items = make_appraisal(self.officer, results=("YES", "YES", "NO"))
-        Appraisal.objects.filter(id=self.appraisal.id).update(config_snapshot=DECISION_APPROVAL)
+        configure(self, DECISION_APPROVAL)
         review.answer_item(self.officer, self.items["co_financing"].id, "NO", "Grant request template")
 
     def _reload(self):
@@ -194,19 +195,21 @@ class DecisionApprovalTest(TestCase):
 
 class ReportTest(ScoringTestCase):
     def test_counts_by_status_city_breakdown_and_what_awaits_action(self):
-        rules = {**RULES, "shortlist": {"per_city": {"Blantyre": 1, "Zomba": 1}},
-                 "report": {"breakdowns": [{"key": "sector", "label": "Sector", "field": "primary_sector"}]}}
-        blantyre, zomba = city_village("Blantyre"), city_village("Zomba")
-        appraisals = [self._eligible({"jobs_to_create": str(jobs)}, rules=rules, location=place, minutes=jobs)
+        configure(self, {**RULES, "shortlist": {"places": 2, "selection_strategy": {
+            "source": "SELF", "spillover": False,
+            "quotas": [city_quota("blantyre", "325", 1), city_quota("zomba", "ZA", 1)]}},
+            "report": {"breakdowns": [{"key": "sector", "label": "Sector", "field": "primary_sector"}]}})
+        blantyre, zomba = {"biz_city": "325"}, {"biz_city": "ZA"}
+        appraisals = [self._eligible({"jobs_to_create": str(jobs)}, answers=place, minutes=jobs)
                       for jobs, place in ((12, blantyre), (6, blantyre), (3, zomba))]
         for appraisal, sector in zip(appraisals, ("agriculture", "energy", "agriculture")):
             appraisal.individual.json_ext = {**(appraisal.individual.json_ext or {}), "primary_sector": sector}
             appraisal.individual.save(user=self.user)
             scoring.score_appraisal(appraisal, self.user)
         scoring.shortlist_round(self.user, "UMEP", "2026-R1")
-        returned = self._eligible(rules=rules, location=zomba)
+        returned = self._eligible(answers=zomba)
         Appraisal.objects.filter(id=returned.id).update(status="RETURNED", eligibility=None)
-        received = self._eligible(rules=rules, location=zomba)
+        received = self._eligible(answers=zomba)
         Appraisal.objects.filter(id=received.id).update(status="RECEIVED", eligibility=None)
 
         report = appraisal_report(self.user, "UMEP")
@@ -217,7 +220,7 @@ class ReportTest(ScoringTestCase):
         cities = {row["city"]: row for row in report["by_city"]}
         self.assertEqual({city: (row["total"], row["eligible"], row["shortlisted"], row["places"])
                           for city, row in cities.items()},
-                         {"Blantyre": (2, 2, 1, 1), "Zomba": (3, 1, 1, 1)})
+                         {"blantyre": (2, 2, 1, 1), "zomba": (3, 1, 1, 1)})
         self.assertEqual(report["breakdowns"][0]["counts"],
                          [{"key": "agriculture", "count": 2}, {"key": "", "count": 2}, {"key": "energy", "count": 1}])
         self.assertEqual((report["awaiting"]["returned"], report["awaiting"]["not_started"]), (1, 1))
@@ -232,6 +235,7 @@ class ApprovalApiTest(openIMISGraphQLTestCase):
         cls.token = BaseTestContext(user=cls.admin).get_jwt()
 
     def test_approvals_and_report_over_graphql(self):
+        configure(self, SHORTLIST_APPROVAL)
         appraisal = Appraisal(individual=create_individual(self.admin.username), programme="UMEP", round="2026-R1",
                               config_snapshot=SHORTLIST_APPROVAL, status="SCORED", stage="DESK_SCORING",
                               eligibility="ELIGIBLE", score=80)

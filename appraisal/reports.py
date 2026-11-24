@@ -13,7 +13,7 @@ from django.db.models import Count, Q
 
 from appraisal.models import Appraisal, AppraisalApproval, AppraisalItem, DocumentReview
 from appraisal.review import OPEN_STATUSES
-from appraisal.scoring import _city_finder
+from appraisal.scoring import quota_groups
 
 Status, Eligibility = Appraisal.Status, Appraisal.Eligibility
 DocumentStatus = DocumentReview.Status
@@ -72,14 +72,16 @@ def appraisal_report(user, programme, round=None):
     appraisals = list(appraisals.filter(round=round).select_related("individual__location"))
     if not appraisals:
         return None
-    snapshot = appraisals[-1].config_snapshot or {}
-    shortlist = snapshot.get("shortlist") or {}
-    city_of = _city_finder(shortlist)
-    places = shortlist.get("per_city") or {}
+    from appraisal.apps import AppraisalConfig
+
+    # Round rules come from the current configuration while it configures this round
+    config = AppraisalConfig.programme(programme) or {}
+    current = config if config.get("round") == round else {}
+    group_of, places = quota_groups(appraisals, current.get("shortlist"))
 
     cities = {}
     for appraisal in appraisals:
-        city = city_of(appraisal) or NO_VALUE
+        city = group_of.get(appraisal.id) or NO_VALUE
         row = cities.setdefault(city, Counter())
         row["total"] += 1
         row["eligible"] += appraisal.eligibility == Eligibility.ELIGIBLE
@@ -89,7 +91,7 @@ def appraisal_report(user, programme, round=None):
         row["shortlisted"] += appraisal.status == Status.SHORTLISTED
 
     breakdowns = []
-    for rule in (snapshot.get("report") or {}).get("breakdowns", []):
+    for rule in (config.get("report") or {}).get("breakdowns", []):
         values = Counter(str((appraisal.individual.json_ext or {}).get(rule["field"]) or NO_VALUE)
                          for appraisal in appraisals)
         breakdowns.append({"key": rule["key"], "label": rule["label"], "counts": _counts(values)})

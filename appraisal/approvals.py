@@ -23,9 +23,9 @@ TASK_SOURCE = "appraisal"
 BUSINESS_EVENTS = {Kind.SHORTLIST: "appraisal_shortlist", Kind.ELIGIBILITY: "appraisal_eligibility"}
 
 
-def approval_required(snapshot, kind):
-    """Whether the programme's rules (an appraisal's config snapshot) need approval for ``kind``."""
-    return bool(((snapshot or {}).get("approval") or {}).get(kind.lower()))
+def approval_required(programme, kind):
+    """Whether the programme's current configuration requires approval for ``kind`` (a round rule)."""
+    return bool(((programme or {}).get("approval") or {}).get(kind.lower()))
 
 
 def pending_approval(kind, programme=None, round=None, appraisal=None):

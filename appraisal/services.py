@@ -11,6 +11,7 @@ import logging
 from django.db import transaction
 
 from appraisal.apps import AppraisalConfig
+from appraisal.config import applicant_rules
 from appraisal.models import Appraisal, AppraisalItem
 from appraisal.prefill import ApplicationContext, evaluate_item, score_inputs
 
@@ -80,7 +81,7 @@ def _apply(individual, code, programme, submission, context, user):
     previous_submission = appraisal.submission_id if appraisal else None
     if appraisal is None:
         appraisal = Appraisal(individual=individual, programme=code, round=programme["round"],
-                              submission=submission, config_snapshot=programme)
+                              submission=submission, config_snapshot=applicant_rules(programme))
     elif appraisal.submission_id and appraisal.submission_id != submission.id and \
             _is_newer(appraisal.submission, submission):
         logger.info("Appraisal %s already uses a newer application than Kobo %s", appraisal.id, submission.kobo_id)
@@ -88,7 +89,7 @@ def _apply(individual, code, programme, submission, context, user):
     else:
         appraisal.submission = submission
     # The rules in force when the appraisal was created keep applying to it
-    rules = appraisal.config_snapshot or programme
+    rules = appraisal.config_snapshot or applicant_rules(programme)
     appraisal.json_ext = {**(appraisal.json_ext or {}), SCORE_INPUTS: _serialisable(score_inputs(rules, context))}
     appraisal.save(user=user)
     for item in rules.get("eligibility", []):

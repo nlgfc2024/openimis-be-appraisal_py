@@ -122,3 +122,28 @@ class DecideEligibilityTest(ReviewTestCase):
         self.assertEqual([d["decision"] for d in appraisal.json_ext["eligibility_decisions"]],
                          ["CLARIFICATION", "ELIGIBLE"])
         self.assertIn("ELIGIBLE", [h.status for h in appraisal.history.all()])
+
+
+class ReopenTest(ReviewTestCase):
+    def test_a_decision_is_cleared_and_screening_done_again(self):
+        review.answer_item(self.officer, self.items["youth_age"].id, "NO", "National ID: born 1980")
+        review.decide_eligibility(self.officer, self.appraisal.id)
+
+        appraisal = review.reopen_screening(self.officer, self.appraisal.id, " Born 1998, misread ")
+
+        self.assertEqual((appraisal.status, appraisal.stage, appraisal.eligibility),
+                         (Status.DESK_SCREENING, Stage.DESK_SCREENING, None))
+        entry = appraisal.json_ext["reopened"][-1]
+        self.assertEqual((entry["from"], entry["by"], entry["reason"]),
+                         ("INELIGIBLE", "appraisalScreener", "Born 1998, misread"))
+        review.answer_item(self.officer, self.items["youth_age"].id, "YES", "National ID: born 1998")
+        review.answer_item(self.officer, self.items["co_financing"].id, "YES", "Template: 40%")
+        self.assertEqual(review.decide_eligibility(self.officer, self.appraisal.id).eligibility, Eligibility.ELIGIBLE)
+
+    def test_only_a_decided_appraisal_with_a_reason(self):
+        with self.assertRaisesMessage(ValidationError, "appraisal.not_reopenable: the appraisal is application"):
+            review.reopen_screening(self.officer, self.appraisal.id, "x")
+        review.answer_item(self.officer, self.items["youth_age"].id, "NO", "ID")
+        review.decide_eligibility(self.officer, self.appraisal.id)
+        with self.assertRaisesMessage(ValidationError, "appraisal.reason_required"):
+            review.reopen_screening(self.officer, self.appraisal.id, "  ")

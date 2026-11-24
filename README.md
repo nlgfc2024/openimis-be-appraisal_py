@@ -143,6 +143,9 @@ An officer answers checklist items and records the eligibility decision (Operati
   decision is added to `json_ext.eligibility_decisions` with the officer, time, comment and the items behind it.
 - Items can be answered, and a decision recorded, only while screening is open (`RECEIVED`, `DOCUMENT_CHECK`,
   `DESK_SCREENING`).
+- **Reopen** an `ELIGIBLE` or `INELIGIBLE` appraisal to correct a wrong decision, with a reason (the return
+  right): the decision is cleared, the appraisal goes back to `DESK_SCREENING`, and the reason is added to
+  `json_ext.reopened` with who and when. An appraisal already scored or shortlisted can't be reopened.
 
 ## Document check and return for action
 
@@ -235,9 +238,11 @@ query {
 ```
 
 - Filters: `programme`, `round`, `stage`, `status` (also `stage_In`, `status_In`), `eligibility` (the last three are enums, written unquoted), `individual_Id`, and `id` (the appraisal's UUID); `search` (name
-  or national ID); `answers` (`key=value` on the applicant's answers); `parentLocation` + `parentLocationLevel`;
-  `needsReview` (an item's basis changed). Needs `gql_query_appraisal_perms`; a user sees the appraisals of the
-  individuals in their locations.
+  or national ID); `answers` (`key=value` on the applicant's answers, matched as text, and as a number when the
+  value is one); `parentLocation` + `parentLocationLevel` (individual's location rule); `needsReview` (an item's
+  basis changed). Needs `gql_query_appraisal_perms` and individual's `gql_individual_search_perms` (159001), since
+  an appraisal shows the applicant's registry record and answers; a user sees the appraisals of the individuals
+  in their locations.
 - `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the
   values that count; score items also give `maxPoints`. `documents` is the document check (`documentsComplete`),
   `returns` the returns for action. `history` lists the changes to the appraisal and its
@@ -258,6 +263,7 @@ query {
 | `reviewApplicantDocument` | `appraisalId`, `documentId`, `status` (`VERIFIED`/`REJECTED`), `comment` | `gql_mutation_review_document_perms` |
 | `returnAppraisal` | `id`, `reason`, `actionRequired` | `gql_mutation_return_appraisal_perms` |
 | `resubmitAppraisal` | `id`, `note` | `gql_mutation_return_appraisal_perms` |
+| `reopenAppraisal` | `id` (appraisal), `reason` | `gql_mutation_return_appraisal_perms` |
 
 Mutations are logged and run like every openIMIS mutation (`mutationLogs` by `clientMutationId`); a refused one
 reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.
@@ -266,12 +272,12 @@ reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.
 
 | Right | Code | Config key |
 | --- | --- | --- |
-| View appraisals | 220001 | `gql_query_appraisal_perms` |
+| View appraisals (with individual search, 159001) | 220001 | `gql_query_appraisal_perms` |
 | Screen (record checks, decide eligibility) | 220002 | `gql_mutation_screen_appraisal_perms` |
 | Score | 220003 | `gql_mutation_score_appraisal_perms` |
 | Shortlist | 220004 | `gql_mutation_shortlist_appraisal_perms` |
 | Review documents | 220005 | `gql_mutation_review_document_perms` |
-| Return for action | 220006 | `gql_mutation_return_appraisal_perms` |
+| Return for action, reopen a decision | 220006 | `gql_mutation_return_appraisal_perms` |
 | Approve (a supervisor approving a held shortlist or decision in Tasks) | 220007 | `gql_mutation_approve_appraisal_perms` |
 
 The 220000 block is reserved for this module; a test fails if another installed module defaults to one of

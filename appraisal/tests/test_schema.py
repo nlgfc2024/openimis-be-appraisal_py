@@ -7,9 +7,11 @@ from core.test_helpers import create_admin_role, create_test_interactive_user
 from individual.tests.test_helpers import create_individual, create_sp_role
 from location.test_helpers import assign_user_districts, create_test_village
 
-from appraisal.apps import RIGHT_APPRAISAL_SCREEN, RIGHT_APPRAISAL_VIEW
+from appraisal.apps import RIGHT_APPRAISAL_RETURN, RIGHT_APPRAISAL_SCREEN, RIGHT_APPRAISAL_VIEW
 from appraisal.models import Appraisal, AppraisalItem
 from appraisal.tests.test_review import make_appraisal
+
+INDIVIDUAL_SEARCH = 159001
 
 APPRAISALS = """
 query ($search: String, $answers: [String]) {
@@ -46,15 +48,26 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
             "json_ext": {"national_id": "AB12CD34", "primary_sector": "energy"}})
         cls.john = create_individual(cls.admin.username, {
             "first_name": "John", "last_name": "Phiri", "location": village_b,
-            "json_ext": {"national_id": "XY98ZW76", "primary_sector": "tourism"}})
+            "json_ext": {"national_id": "XY98ZW76", "primary_sector": "tourism", "jobs_to_create": 5}})
         cls.screener = create_test_interactive_user(
             username="appraisalApiScreener",
-            roles=[_role("Appraisal screener", [RIGHT_APPRAISAL_VIEW, RIGHT_APPRAISAL_SCREEN], cls.admin).id])
+            roles=[_role("Appraisal screener", [RIGHT_APPRAISAL_VIEW, RIGHT_APPRAISAL_SCREEN, INDIVIDUAL_SEARCH],
+                         cls.admin).id])
         assign_user_districts(cls.screener, [village_a.parent.parent.code])
         cls.screener_token = BaseTestContext(user=cls.screener).get_jwt()
         cls.viewer = create_test_interactive_user(
-            username="appraisalApiViewer", roles=[_role("Appraisal viewer", [RIGHT_APPRAISAL_VIEW], cls.admin).id])
+            username="appraisalApiViewer",
+            roles=[_role("Appraisal viewer", [RIGHT_APPRAISAL_VIEW, INDIVIDUAL_SEARCH], cls.admin).id])
         cls.viewer_token = BaseTestContext(user=cls.viewer).get_jwt()
+        cls.appraisal_only = create_test_interactive_user(
+            username="appraisalApiOnly", roles=[_role("Appraisal only", [RIGHT_APPRAISAL_VIEW], cls.admin).id])
+        cls.appraisal_only_token = BaseTestContext(user=cls.appraisal_only).get_jwt()
+        cls.reopener = create_test_interactive_user(
+            username="appraisalApiReopener",
+            roles=[_role("Appraisal reopener", [RIGHT_APPRAISAL_VIEW, INDIVIDUAL_SEARCH, RIGHT_APPRAISAL_RETURN],
+                         cls.admin).id])
+        assign_user_districts(cls.reopener, [village_a.parent.parent.code])
+        cls.reopener_token = BaseTestContext(user=cls.reopener).get_jwt()
         cls.nobody = create_test_interactive_user(username="appraisalApiNobody", roles=[create_sp_role(cls.admin).id])
         cls.nobody_token = BaseTestContext(user=cls.nobody).get_jwt()
 
@@ -81,7 +94,8 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
 
     def test_search_and_answer_filters(self):
         cases = [({"search": "ab12"}, ["Banda"]), ({"search": "phiri"}, ["Phiri"]),
-                 ({"answers": ["primary_sector=tourism"]}, ["Phiri"])]
+                 ({"answers": ["primary_sector=tourism"]}, ["Phiri"]), ({"answers": ["jobs_to_create=5"]}, ["Phiri"]),
+                 ({"answers": ["jobs_to_create=5.0"]}, ["Phiri"]), ({"answers": ["jobs_to_create=6"]}, [])]
         for variables, expected in cases:
             with self.subTest(variables=variables):
                 nodes = self._appraisals(self.admin_token, **variables)["data"]["appraisal"]["edges"]
@@ -92,6 +106,25 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
         self.assertEqual([n["node"]["individual"]["lastName"] for n in nodes], ["Banda"])
         content = self._appraisals(self.nobody_token)
         self.assertEqual(content["errors"][0]["message"], "unauthorized")
+
+    def test_applicant_data_needs_the_individual_search_right_too(self):
+        content = self._appraisals(self.appraisal_only_token)
+        self.assertEqual(content["errors"][0]["message"], "unauthorized")
+        self.assertNotIn("errors", self._appraisals(self.viewer_token))
+
+    def test_a_decision_is_reopened_with_the_return_right_and_a_reason(self):
+        Appraisal.objects.filter(id=self.appraisal_a.id).update(status="INELIGIBLE", eligibility="INELIGIBLE",
+                                                                stage="CLOSED")
+        mutation = f'''mutation {{ reopenAppraisal(input: {{id: "{self.appraisal_a.id}",
+            reason: "Age misread from the ID"}}) {{ internalId }} }}'''
+        with self.assertRaisesRegex(ValueError, "unauthorized"):
+            self.send_mutation_raw(mutation, self.screener_token)
+
+        self.send_mutation_raw(mutation, self.reopener_token)
+
+        appraisal = Appraisal.objects.get(id=self.appraisal_a.id)
+        self.assertEqual((appraisal.status, appraisal.eligibility), ("DESK_SCREENING", None))
+        self.assertEqual(appraisal.json_ext["reopened"][0]["reason"], "Age misread from the ID")
 
     def test_a_screener_answers_and_decides_and_the_history_shows_it(self):
         self.send_mutation_raw(

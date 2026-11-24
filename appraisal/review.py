@@ -5,6 +5,9 @@ eligibility decision. Called by the GraphQL mutations; rights are checked there,
   the clarification asked for. The answer is recorded against the officer and time, and clears basis_changed.
 - Items can be answered only while the screening is open: before an eligibility decision, or after one that
   asked for clarification.
+- A wrong decision is corrected by reopening the screening with a reason (the return right): the decision is
+  cleared and the officer answers and decides again. Only ELIGIBLE and INELIGIBLE appraisals can be reopened,
+  not those already scored or shortlisted.
 - The decision follows the Annex 2A rule from the answers that count (the officer's, else the system's): any No
   is INELIGIBLE, otherwise any Pending is CLARIFICATION, otherwise ELIGIBLE. An item whose basis changed since
   the officer answered it must be answered again first, and the document check must be complete
@@ -23,6 +26,8 @@ Eligibility, Stage, Status = Appraisal.Eligibility, Appraisal.Stage, Appraisal.S
 
 OPEN_STATUSES = (Status.RECEIVED, Status.DOCUMENT_CHECK, Status.DESK_SCREENING)
 DECISION_LOG = "eligibility_decisions"
+REOPEN_LOG = "reopened"
+REOPENABLE = (Status.ELIGIBLE, Status.INELIGIBLE)
 
 
 def _locked_appraisal(appraisal_id, user):
@@ -149,3 +154,21 @@ def apply_decision_approval(approval, user):
         raise ValidationError("appraisal.answers_changed: the checklist changed since the decision was asked for")
     _apply_decision(appraisal, user, decision, results, approval.proposal.get("comment"),
                     requested_by=approval.requested_by, approved_by=user)
+
+
+@transaction.atomic
+def reopen_screening(user, appraisal_id, reason):
+    """Clear the eligibility decision so the screening can be done again; returns the appraisal."""
+    appraisal = _locked_appraisal(appraisal_id, user)
+    if appraisal.status not in REOPENABLE:
+        raise ValidationError(f"appraisal.not_reopenable: the appraisal is {appraisal.get_status_display().lower()}")
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValidationError("appraisal.reason_required: say why the decision is being corrected")
+    log = (appraisal.json_ext or {}).get(REOPEN_LOG, [])
+    entry = {"from": appraisal.status, "by": user.username, "at": timezone.now().isoformat(), "reason": reason}
+    appraisal.json_ext = {**(appraisal.json_ext or {}), REOPEN_LOG: [*log, entry]}
+    appraisal.eligibility = None
+    appraisal.stage, appraisal.status = Stage.DESK_SCREENING, Status.DESK_SCREENING
+    appraisal.save(user=user)
+    return appraisal

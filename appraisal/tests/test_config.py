@@ -115,7 +115,7 @@ class ProgrammeConfigTest(SimpleTestCase):
 
 class AppraisalConfigLoadTest(SimpleTestCase):
     def setUp(self):
-        saved = {name: getattr(AppraisalConfig, name) for name in DEFAULT_CONFIG}
+        saved = {name: getattr(AppraisalConfig, name) for name in [*DEFAULT_CONFIG, "config_error"]}
         self.addCleanup(lambda: [setattr(AppraisalConfig, name, value) for name, value in saved.items()])
 
     def test_loads_programmes_and_rights(self):
@@ -148,7 +148,7 @@ class ModuleConfigurationSaveTest(TestCase):
 
 
 class ReadySavedConfigurationTest(TestCase):
-    """ready() reads the saved row itself: a row that isn't a JSON object stops the module."""
+    """ready() reads the saved row itself: a broken row disables the programmes and is reported, the backend starts."""
 
     def setUp(self):
         saved = {name: getattr(AppraisalConfig, name) for name in DEFAULT_CONFIG}
@@ -165,24 +165,35 @@ class ReadySavedConfigurationTest(TestCase):
         ModuleConfiguration.objects.bulk_create([row])
         ModuleConfiguration.objects.filter(module="appraisal").update(config=config)
 
-    def test_a_malformed_saved_row_stops_the_module(self):
+    def assertDisabled(self, message):
+        with self.assertLogs("appraisal.apps", level="ERROR") as logs:
+            self.app.ready()
+        self.assertIn(message, logs.output[0])
+        self.assertEqual(AppraisalConfig.programmes, {})
+        self.assertIn(message, AppraisalConfig.config_error)
+        with self.assertRaisesMessage(ValidationError, f"appraisal.not_configured: {AppraisalConfig.config_error}"):
+            AppraisalConfig.check_configured()
+
+    def test_a_malformed_saved_row_disables_the_programmes(self):
         for config, message in (("[]", "must be a JSON object"), ("null", "must be a JSON object"),
                                 ("{bad", "is not valid JSON")):
             with self.subTest(config=config):
                 ModuleConfiguration.objects.filter(module="appraisal").delete()
                 self._store(config)
-                with self.assertRaisesMessage(ValidationError, message):
-                    self.app.ready()
+                self.assertDisabled(message)
 
-    def test_an_invalid_saved_programme_stops_the_module(self):
-        self._store(json.dumps({"programmes": {"UMEP": {"round": "R1"}}}))
-        with self.assertRaises(ValidationError):
-            self.app.ready()
+    def test_an_invalid_saved_programme_disables_the_programmes(self):
+        self._store(json.dumps({"programmes": {"UMEP": {"round": "R1"}, "PWP": PROGRAMME}}))
+        self.assertDisabled("programmes.UMEP.source_types")
+        # Rights fall back to the defaults, not to the broken row's
+        self.assertEqual(AppraisalConfig.gql_query_appraisal_perms, DEFAULT_CONFIG["gql_query_appraisal_perms"])
 
     def test_a_valid_saved_row_is_loaded_and_no_row_gives_the_defaults(self):
         self._store(json.dumps({"programmes": {"UMEP": PROGRAMME}}))
         self.app.ready()
         self.assertEqual(AppraisalConfig.programme("UMEP")["round"], "2026-R1")
+        self.assertIsNone(AppraisalConfig.config_error)
+        AppraisalConfig.check_configured()
         ModuleConfiguration.objects.filter(module="appraisal").delete()
         self.app.ready()
         self.assertEqual(AppraisalConfig.programmes, {})

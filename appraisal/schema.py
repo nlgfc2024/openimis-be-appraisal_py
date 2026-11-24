@@ -13,6 +13,7 @@ from appraisal.apps import AppraisalConfig
 from appraisal.gql_mutations import (
     AnswerAppraisalItemMutation,
     AnswerAppraisalScoreMutation,
+    CloseShortlistMutation,
     DecideAppraisalEligibilityMutation,
     ReopenAppraisalMutation,
     ResubmitAppraisalMutation,
@@ -136,3 +137,4 @@ class Mutation(graphene.ObjectType):
     review_applicant_document = ReviewApplicantDocumentMutation.Field()
     return_appraisal = ReturnAppraisalMutation.Field()
     resubmit_appraisal = ResubmitAppraisalMutation.Field()
+    close_shortlist = CloseShortlistMutation.Field()

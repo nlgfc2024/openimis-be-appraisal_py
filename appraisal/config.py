@@ -15,7 +15,8 @@ ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "loc
 LOCATION_TYPES = ("R", "D", "W", "V")
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
-SHORTLIST_KEYS = {"size", "per_city", "location_type"}
+SHORTLIST_KEYS = {"size", "per_city", "location_type", "city", "individual_field"}
+CITY_KEYS = {"field", "location_type"}
 
 
 def _is_number(value):
@@ -170,8 +171,22 @@ def _shortlist(errors, shortlist, path):
         errors.append(f"{path} must be an object.")
         return
     _unexpected(errors, shortlist, SHORTLIST_KEYS, path)
-    if "size" not in shortlist and "per_city" not in shortlist:
-        errors.append(f"{path} needs size, per_city, or both.")
+    if ("size" in shortlist) == ("per_city" in shortlist):
+        errors.append(f"{path} needs either size (one overall shortlist) or per_city (places per city), not both.")
+    if "city" in shortlist:
+        city = shortlist["city"]
+        if "per_city" not in shortlist:
+            errors.append(f"{path}.city is only used with per_city.")
+        if not isinstance(city, dict):
+            errors.append(f"{path}.city must be an object with field and location_type.")
+        else:
+            _unexpected(errors, city, CITY_KEYS, f"{path}.city")
+            if not _is_text(city.get("field")):
+                errors.append(f"{path}.city.field must be the answer holding the business location code.")
+            if city.get("location_type") not in LOCATION_TYPES:
+                errors.append(f"{path}.city.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
+    if "individual_field" in shortlist and not _is_text(shortlist["individual_field"]):
+        errors.append(f"{path}.individual_field must be the name of the individual's json_ext field.")
     if "location_type" in shortlist and shortlist["location_type"] not in LOCATION_TYPES:
         errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
     if "size" in shortlist and not _positive_int(shortlist["size"]):

@@ -196,3 +196,21 @@ class ReopenAppraisalMutation(BaseMutation):
     @classmethod
     def _mutate(cls, user, **data):
         review.reopen_screening(user, data["id"], data["reason"])
+
+
+class CloseShortlistMutation(BaseMutation):
+    """Make a programme round's shortlist final: it can't be run again."""
+    _mutation_class = "CloseShortlistMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        programme = graphene.String(required=True)
+        round = graphene.String(required=True)
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_shortlist_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.close_shortlist(user, data["programme"], data["round"])

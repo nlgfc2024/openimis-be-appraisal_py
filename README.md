@@ -19,6 +19,18 @@ Place this repository next to `openimis-be_py` and add it to `openimis.json`:
 }
 ```
 
+### Rollout order
+
+The module reads other modules' new code at startup (msr_etl's signals, calcrule_validations' strategies,
+enrolment's scoring helpers), so a partial rollout won't boot. Deploy in this order:
+
+1. openimis-be-msr_etl_py#129: the Kobo submission and document signals.
+2. openimis-be-calcrule_validations_py#1, with openimis-be_py#21 pinning the hub to the nlgfc2024 fork.
+3. openimis-be-enrolment_py#14: the public scoring and quota helpers.
+4. openimis-be-household_validation_py#48: `requires_json_ext`, which selects shortlisted applicants.
+5. This module and openimis-fe-appraisal_js, with their `openimis.json` entries in the backend and frontend hubs.
+6. The programme's configuration (for UMEP, nlgfc2024/coremis-configs#11), applied last.
+
 ## Configuration
 
 `ModuleConfiguration` for module `appraisal` (layer `be`). Saved top-level keys replace the defaults. The
@@ -58,7 +70,7 @@ configuration is checked when it is saved and again at start; every problem is r
 | `eligibility` | The prerequisite checklist. Each item has a unique `key` and a `label`, and either a `strategy` (a calcrule_validations strategy run on `field`, with `params` and optional `location_type`), a `check` (`youth_ownership`, `co_financing`, with `params`), or neither for an item only an officer judges. See "Pre-fill from the application". |
 | `inputs` | Score inputs derived from answers and documents (`months_since`, `all_answered`, `document_stored`). |
 | `scoring` | Score components: `key`, `label`, `field`, `weight` and `scoring` in enrolment's weighted-score shape (`mapping` or `numeric_bands`); the total is normalised to `normalise_to` (default 100). |
-| `shortlist` | Places: `size` overall, and/or `per_city` places by city. |
+| `shortlist` | Places: either `size` overall or `per_city` places by city name. `location_type` (default `R`) is the city's location type; `city` (`field`, `location_type`) takes the city from an answered business location code instead of the individual's location; `individual_field` names the individual's `json_ext` field that receives the outcome. |
 | `documents` | The document check: `required` document types, optionally only `when` an answer is one of `in`. |
 | `approval` | `shortlist` and/or `eligibility`: `true` holds the shortlist / each eligibility decision for a supervisor's approval in tasks_management. |
 | `report` | `breakdowns`: application fields (`key`, `label`, `field`) the report counts appraisals by, e.g. the sector. |
@@ -179,7 +191,8 @@ Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, st
 - **Score.** An eligible appraisal is scored as soon as it is decided eligible, or with `scoreAppraisals`. Each
   score component gets a `SCORE` item whose system points come from the application's score input
   (`json_ext.score_inputs`) through enrolment's scoring rules (`component_points`), so appraisal and enrolment
-  score alike. A missing or unreadable input scores the component's default and its basis says why.
+  score alike. A missing or unreadable input gives the component no points and its basis says why; the total stays
+  empty until an officer sets them, so nobody is ranked on a value no one has looked at.
 - **Total.** Each component's points are weighed by `weight / maximum points` and the sum is scaled to
   `normalise_to` (as enrolment's weighted score). With weights equal to the maximum points it is the plain sum.
 - **Officer points.** `answerAppraisalScore` sets a component's points (from 0 to its maximum) with the evidence
@@ -188,11 +201,20 @@ Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, st
   whose basis changed under them is flagged `basis_changed`; unchanged rescoring writes nothing.
 - **Shortlist.** `shortlistAppraisals` scores any appraisal still `ELIGIBLE`, then ranks the round's scored
   appraisals by score (highest first), submission time, then Kobo id. The top `shortlist.per_city` places of each
-  city (the applicant's location's ancestor of `shortlist.location_type`, default `R`), or the top `shortlist.size`
-  overall, become `SHORTLISTED`, the rest `NOT_SHORTLISTED`; `rank` is the position in the city. A city with fewer
-  applicants than places shortlists them all; one not in `per_city` has no places. The individual's
-  `json_ext.desk_appraisal_status` records the outcome for field validation, and each appraisal keeps the run in
-  `json_ext.shortlist`. Running it again recomputes. It refuses while a score's basis changed unreviewed.
+  city, or the top `shortlist.size` overall, become `SHORTLISTED`, the rest `NOT_SHORTLISTED`; `rank` is the
+  position in the city. A city with fewer applicants than places shortlists them all.
+  - The city is the `shortlist.location_type` ancestor (default `R`) of the business location answered to
+    `shortlist.city.field` (a `city.location_type` code, followed to its current code), or of the individual's
+    location when `city` isn't set.
+  - It refuses while a score is missing or its basis changed unreviewed, when an applicant's city (or no city) has
+    no places in `per_city`, and when the round's appraisals hold different shortlist rules.
+  - Each appraisal keeps the run (who, when, places, ranked and shortlisted per city) in `json_ext.shortlist`, which
+    the shortlist screen shows. With `shortlist.individual_field` set, the outcome is also written to that field of
+    the individual's `json_ext`, through the individual service, for field validation to select from.
+  - Running it again recomputes, until the round is closed.
+- **Close.** `closeShortlist` makes the round's outcome final: its `SHORTLISTED` and `NOT_SHORTLISTED` appraisals move
+  to stage `CLOSED` and the shortlist can't be run again for the round. It refuses while scored appraisals aren't
+  ranked yet. Later applications are still screened and scored.
 - A programme without score components stops at eligibility.
 
 ## Approval and reports
@@ -263,6 +285,7 @@ query {
 | `reviewApplicantDocument` | `appraisalId`, `documentId`, `status` (`VERIFIED`/`REJECTED`), `comment` | `gql_mutation_review_document_perms` |
 | `returnAppraisal` | `id`, `reason`, `actionRequired` | `gql_mutation_return_appraisal_perms` |
 | `resubmitAppraisal` | `id`, `note` | `gql_mutation_return_appraisal_perms` |
+| `closeShortlist` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
 | `reopenAppraisal` | `id` (appraisal), `reason` | `gql_mutation_return_appraisal_perms` |
 
 Mutations are logged and run like every openIMIS mutation (`mutationLogs` by `clientMutationId`); a refused one

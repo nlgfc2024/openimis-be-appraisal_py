@@ -13,7 +13,7 @@ from django.db.models import Count, Q
 
 from appraisal.models import Appraisal, AppraisalApproval, AppraisalItem, DocumentReview
 from appraisal.review import OPEN_STATUSES
-from appraisal.scoring import DEFAULT_CITY_LOCATION_TYPE, _city
+from appraisal.scoring import _city_finder
 
 Status, Eligibility = Appraisal.Status, Appraisal.Eligibility
 DocumentStatus = DocumentReview.Status
@@ -74,12 +74,12 @@ def appraisal_report(user, programme, round=None):
         return None
     snapshot = appraisals[-1].config_snapshot or {}
     shortlist = snapshot.get("shortlist") or {}
-    location_type, cache = shortlist.get("location_type", DEFAULT_CITY_LOCATION_TYPE), {}
+    city_of = _city_finder(shortlist)
     places = shortlist.get("per_city") or {}
 
     cities = {}
     for appraisal in appraisals:
-        city = _city(appraisal.individual.location, location_type, cache) or NO_VALUE
+        city = city_of(appraisal) or NO_VALUE
         row = cities.setdefault(city, Counter())
         row["total"] += 1
         row["eligible"] += appraisal.eligibility == Eligibility.ELIGIBLE

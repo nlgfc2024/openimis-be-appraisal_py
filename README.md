@@ -134,6 +134,29 @@ An officer answers checklist items and records the eligibility decision (Operati
 - Items can be answered, and a decision recorded, only while screening is open (`RECEIVED`, `DOCUMENT_CHECK`,
   `DESK_SCREENING`).
 
+## Desk scoring and the shortlist
+
+Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, stage 2):
+
+- **Score.** An eligible appraisal is scored as soon as it is decided eligible, or with `scoreAppraisals`. Each
+  score component gets a `SCORE` item whose system points come from the application's score input
+  (`json_ext.score_inputs`) through enrolment's scoring rules (`component_points`), so appraisal and enrolment
+  score alike. A missing or unreadable input scores the component's default and its basis says why.
+- **Total.** Each component's points are weighed by `weight / maximum points` and the sum is scaled to
+  `normalise_to` (as enrolment's weighted score). With weights equal to the maximum points it is the plain sum.
+- **Officer points.** `answerAppraisalScore` sets a component's points (from 0 to its maximum) with the evidence
+  checked; the total follows. Only while the appraisal is `SCORED`.
+- **Refresh.** A new application or document rescores a scored appraisal. An officer's points stay, and a component
+  whose basis changed under them is flagged `basis_changed`; unchanged rescoring writes nothing.
+- **Shortlist.** `shortlistAppraisals` scores any appraisal still `ELIGIBLE`, then ranks the round's scored
+  appraisals by score (highest first), submission time, then Kobo id. The top `shortlist.per_city` places of each
+  city (the applicant's location's ancestor of `shortlist.location_type`, default `R`), or the top `shortlist.size`
+  overall, become `SHORTLISTED`, the rest `NOT_SHORTLISTED`; `rank` is the position in the city. A city with fewer
+  applicants than places shortlists them all; one not in `per_city` has no places. The individual's
+  `json_ext.desk_appraisal_status` records the outcome for field validation, and each appraisal keeps the run in
+  `json_ext.shortlist`. Running it again recomputes. It refuses while a score's basis changed unreviewed.
+- A programme without score components stops at eligibility.
+
 ## GraphQL API
 
 ```graphql
@@ -159,7 +182,8 @@ query {
   `needsReview` (an item's basis changed). Needs `gql_query_appraisal_perms`; a user sees the appraisals of the
   individuals in their locations.
 - `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the
-  values that count. `history` lists the changes to the appraisal and its items (field, old, new), newest first.
+  values that count; score items also give `maxPoints`. `history` lists the changes to the appraisal and its
+  items (field, old, new), newest first.
 - The application's answers and documents are read with msr_etl's `koboApplications(individualId)` and
   `applicantDocuments(individualId)`, under msr_etl's own rights.
 
@@ -167,6 +191,9 @@ query {
 | --- | --- | --- |
 | `answerAppraisalItem` | `id` (item), `result` (`YES`/`NO`/`PENDING`), `evidence`, `comment` | `gql_mutation_screen_appraisal_perms` |
 | `decideAppraisalEligibility` | `id` (appraisal), `comment` | `gql_mutation_screen_appraisal_perms` |
+| `scoreAppraisals` | `programme`, `round`, `ids` (optional) | `gql_mutation_score_appraisal_perms` |
+| `answerAppraisalScore` | `id` (score item), `points`, `evidence`, `comment` | `gql_mutation_score_appraisal_perms` |
+| `shortlistAppraisals` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
 
 Mutations are logged and run like every openIMIS mutation (`mutationLogs` by `clientMutationId`); a refused one
 reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.

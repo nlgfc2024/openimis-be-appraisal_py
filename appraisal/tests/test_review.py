@@ -147,3 +147,26 @@ class ReopenTest(ReviewTestCase):
         review.decide_eligibility(self.officer, self.appraisal.id)
         with self.assertRaisesMessage(ValidationError, "appraisal.reason_required"):
             review.reopen_screening(self.officer, self.appraisal.id, "  ")
+
+
+class DecisionPreviewTest(ReviewTestCase):
+    def test_the_preview_is_the_rule_the_decision_applies(self):
+        preview = review.decision_preview(self.appraisal)
+        self.assertEqual((preview["decision"], preview["pending"], preview["problem"]),
+                         (Eligibility.CLARIFICATION, ["co_financing"], None))
+        review.answer_item(self.officer, self.items["sector"].id, "NO", "Retail is not a priority sector")
+        self.assertEqual(review.decision_preview(self.appraisal)["decision"], Eligibility.INELIGIBLE)
+
+    def test_a_rule_without_an_item_blocks_it_as_the_decision_does(self):
+        self.items["sector"].delete(user=self.officer)
+        preview = review.decision_preview(self.appraisal)
+        self.assertEqual((preview["decision"], preview["unanswered"]), (None, ["sector"]))
+        self.assertEqual(preview["problem"], "appraisal.checklist_incomplete: sector")
+        with self.assertRaisesMessage(ValidationError, preview["problem"]):
+            review.decide_eligibility(self.officer, self.appraisal.id)
+
+    def test_a_changed_answer_is_named(self):
+        AppraisalItem.objects.filter(id=self.items["youth_age"].id).update(basis_changed=True)
+        preview = review.decision_preview(self.appraisal)
+        self.assertEqual((preview["changed"], preview["problem"]),
+                         (["youth_age"], "appraisal.answers_changed: review youth_age again"))

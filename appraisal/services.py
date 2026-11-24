@@ -3,7 +3,8 @@
 An application imported or updated by msr_etl gets one appraisal per programme that appraises its source, with
 a checklist item per eligibility rule pre-filled from its answers (appraisal.prefill). A repeat application,
 or a document that arrives later, refreshes the system's values; an officer's answer is never changed, and an
-item whose basis changed after an officer answered it is flagged ``basis_changed`` for review.
+item whose basis changed after an officer answered it, or after the eligibility decision, is flagged
+``basis_changed`` for review.
 """
 import logging
 
@@ -16,6 +17,25 @@ from appraisal.prefill import ApplicationContext, evaluate_item, score_inputs
 logger = logging.getLogger(__name__)
 
 SCORE_INPUTS = "score_inputs"
+# Statuses after the eligibility decision, when a changed system value has to be reviewed
+DECIDED = {Appraisal.Status.ELIGIBLE, Appraisal.Status.INELIGIBLE, Appraisal.Status.SCORED,
+           Appraisal.Status.SHORTLISTED, Appraisal.Status.NOT_SHORTLISTED}
+
+
+def _is_newer(submission, other):
+    """Whether ``submission`` was made after ``other``: by submission time, which holds across Kobo forms, else
+    by Kobo id (comparable within one form)."""
+    mine, theirs = _naive(submission.submitted_at), _naive(other.submitted_at)
+    if mine and theirs and mine != theirs:
+        return mine > theirs
+    return submission.kobo_id > other.kobo_id
+
+
+def _naive(moment):
+    """A just-imported submission's time can be aware while a saved one (USE_TZ off) is naive."""
+    from django.utils import timezone
+
+    return timezone.make_naive(moment) if moment and timezone.is_aware(moment) else moment
 
 
 def programmes_for(source_type):
@@ -61,7 +81,7 @@ def _apply(individual, code, programme, submission, context, user):
         appraisal = Appraisal(individual=individual, programme=code, round=programme["round"],
                               submission=submission, config_snapshot=programme)
     elif appraisal.submission_id and appraisal.submission_id != submission.id and \
-            appraisal.submission.kobo_id > submission.kobo_id:
+            _is_newer(appraisal.submission, submission):
         logger.info("Appraisal %s already uses a newer application than Kobo %s", appraisal.id, submission.kobo_id)
         return appraisal
     else:
@@ -90,7 +110,7 @@ def _apply_item(appraisal, config, outcome, user):
         return
     if (item.system_result, item.basis) == (outcome.result, basis):
         return
-    if item.is_overridden:
+    if item.is_overridden or appraisal.status in DECIDED:
         item.basis_changed = True
     item.system_result, item.basis = outcome.result, basis
     item.save(user=user)

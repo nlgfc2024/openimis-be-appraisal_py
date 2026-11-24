@@ -113,8 +113,42 @@ class AppraisalChangeGQLType(graphene.ObjectType):
     changes = graphene.JSONString(description="[{field, old, new}]; empty for the creation")
 
 
+class DecisionPreviewGQLType(graphene.ObjectType):
+    """What the checklist leads to now, by the rule decideAppraisalEligibility applies."""
+    decision = graphene.String(description="ELIGIBLE, INELIGIBLE or CLARIFICATION; null while an item is unanswered")
+    ineligible = graphene.List(graphene.String, description="Keys of the items answered No")
+    pending = graphene.List(graphene.String, description="Keys of the items answered Pending")
+    unanswered = graphene.List(graphene.String, description="Keys of the rules with no answer yet")
+    changed = graphene.List(graphene.String, description="Keys whose application changed since an officer answered")
+    problem = graphene.String(description="Why the decision can't be recorded now (the mutation's refusal), or null")
+
+
+def _allowed(info, perms_name):
+    """Whether the requesting user holds the appraisal right configured as ``perms_name``."""
+    from appraisal.apps import AppraisalConfig
+
+    perms = getattr(AppraisalConfig, perms_name)
+    user = info.context.user
+    return bool(perms) and user.is_authenticated and user.has_perms(perms)
+
+
+def _can_screen(appraisal, info):
+    from appraisal.review import screening_problem
+
+    return _allowed(info, "gql_mutation_screen_appraisal_perms") and screening_problem(appraisal) is None
+
+
 class AppraisalGQLType(DjangoObjectType):
     uuid = graphene.String(source="uuid")
+    decision_preview = graphene.Field(DecisionPreviewGQLType)
+    can_screen = graphene.Boolean(description="The user may answer the checklist now")
+    can_decide = graphene.Boolean(description="The user may record the eligibility decision now")
+    can_reopen = graphene.Boolean(description="The user may reopen the recorded decision")
+    can_score = graphene.Boolean(description="The user may correct a score item's value now")
+    can_rescore = graphene.Boolean(description="The user may (re)score the appraisal now")
+    can_return = graphene.Boolean(description="The user may return the appraisal for action now")
+    can_resubmit = graphene.Boolean(description="The user may resubmit the returned appraisal")
+    shortlist_group = graphene.String(description="The quota the last shortlist ranked it in (e.g. its city), or null")
     items = graphene.List(AppraisalItemGQLType, kind=graphene.String(),
                           description="Active items, in the order of the appraisal's rules")
     history = graphene.List(AppraisalChangeGQLType, description="Changes to the appraisal and its items, newest first")
@@ -145,6 +179,47 @@ class AppraisalGQLType(DjangoObjectType):
         items = [item for item in self.items.all() if not item.is_deleted and (kind is None or item.kind == kind)]
         order = {(k, key): i for k in AppraisalItem.Kind.values for i, key in enumerate(_rules(self, k))}
         return sorted(items, key=lambda item: (item.kind, order.get((item.kind, item.key), len(order)), item.key))
+
+    def resolve_decision_preview(self, info):
+        from appraisal.review import decision_preview
+
+        return decision_preview(self)
+
+    def resolve_can_screen(self, info):
+        return _can_screen(self, info)
+
+    def resolve_can_decide(self, info):
+        from appraisal.review import decision_preview
+
+        return _can_screen(self, info) and decision_preview(self)["problem"] is None
+
+    def resolve_can_score(self, info):
+        return _allowed(info, "gql_mutation_score_appraisal_perms") and self.status == Appraisal.Status.SCORED
+
+    def resolve_can_rescore(self, info):
+        from appraisal.scoring import SCORABLE
+
+        return _allowed(info, "gql_mutation_score_appraisal_perms") and self.status in SCORABLE
+
+    def resolve_can_return(self, info):
+        from appraisal.returns import return_problem
+
+        return _allowed(info, "gql_mutation_return_appraisal_perms") and return_problem(self) is None
+
+    def resolve_can_resubmit(self, info):
+        from appraisal.returns import can_resubmit
+
+        return _allowed(info, "gql_mutation_return_appraisal_perms") and can_resubmit(self)
+
+    def resolve_shortlist_group(self, info):
+        from appraisal.scoring import SHORTLIST_GROUP
+
+        return (self.json_ext or {}).get(SHORTLIST_GROUP)
+
+    def resolve_can_reopen(self, info):
+        from appraisal.review import REOPENABLE
+
+        return _allowed(info, "gql_mutation_return_appraisal_perms") and self.status in REOPENABLE
 
     def resolve_submission_id(self, info):
         return self.submission_id
@@ -212,3 +287,11 @@ def _changes(records, subject):
 
 def _plain(value):
     return value if value is None or isinstance(value, (str, int, float, bool, dict, list)) else str(value)
+
+
+class AppraisalRoundGQLType(graphene.ObjectType):
+    """A programme round: the one configured now, or one with appraisals the user may see."""
+    programme = graphene.String()
+    round = graphene.String()
+    configured = graphene.Boolean(description="The programme's current round in the configuration")
+    appraisals = graphene.Int(description="Appraisals of the round the user may see")

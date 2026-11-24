@@ -359,3 +359,21 @@ class ScoringApiTest(openIMISGraphQLTestCase):
         self.send_mutation_raw('mutation { closeShortlist(input: {programme: "UMEP", round: "2026-R1"}) '
                                '{ internalId } }', self.token)
         self.assertEqual(Appraisal.objects.get(id=self.appraisal.id).stage, "CLOSED")
+
+    def test_the_page_is_told_what_scoring_it_may_do_and_the_rounds_to_choose(self):
+        query = 'query ($id: ID) { appraisal(id: $id) { edges { node { canScore canRescore shortlistGroup } } } }'
+
+        def node():
+            response = self.query(query, variables={"id": str(self.appraisal.id)},
+                                  headers={"HTTP_AUTHORIZATION": f"Bearer {self.token}"})
+            return json.loads(response.content)["data"]["appraisal"]["edges"][0]["node"]
+
+        self.assertEqual(node(), {"canScore": False, "canRescore": True, "shortlistGroup": None})
+        Appraisal.objects.filter(id=self.appraisal.id).update(
+            status="SCORED", json_ext={**self.appraisal.json_ext, "shortlist_group": "zomba"})
+        self.assertEqual(node(), {"canScore": True, "canRescore": True, "shortlistGroup": "zomba"})
+
+        response = self.query("{ appraisalRounds { programme round configured appraisals } }",
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.token}"})
+        rounds = json.loads(response.content)["data"]["appraisalRounds"]
+        self.assertIn({"programme": "UMEP", "round": "2026-R1", "configured": True, "appraisals": 1}, rounds)

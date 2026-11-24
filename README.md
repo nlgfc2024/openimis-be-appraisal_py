@@ -6,7 +6,7 @@ checklist, score rules and shortlist come from configuration. Urban MEP (UMEP) i
 applications imported from Kobo by `msr_etl` (Urban MEP Operations Manual, chapter 8 and Annex 2A/2B).
 
 Built in work packages tracked in [#1](https://github.com/nlgfc2024/openimis-be-appraisal_py/issues/1). This
-version holds the module skeleton: configuration, its validation and the rights.
+version holds the configuration, its validation, the rights and the data model.
 
 ## Installation
 
@@ -74,6 +74,21 @@ mutations answer `appraisal.not_configured` with the problems until the configur
 
 Strategy names and score rules are checked in full by the pre-fill and scoring work packages; this version
 checks their shape.
+
+## Data model
+
+Both models keep every change in a history table (`simple_history`) with the user and time (Operations
+Manual 8.11), and are soft-deleted (`is_deleted`).
+
+| Model | Holds |
+| --- | --- |
+| `Appraisal` (`HistoryBusinessModel`) | One per person, `programme` and `round` (unique among active appraisals): the `submission` appraised (msr_etl `KoboSubmission`), `stage`, `status`, `eligibility`, `score`, `rank`, and `config_snapshot`, the programme's rules when it was created. |
+| `AppraisalItem` (`HistoryModel`) | One per checklist item (`ELIGIBILITY`, a result: `YES` / `NO` / `PENDING`) or score component (`SCORE`, points), unique per appraisal, kind and `key`. The system's value with its `basis`, and the officer's value with `evidence`, `comment`, `decided_by` and `decided_at`. |
+
+- **Stage and status.** `stage` is where the application is: `DOCUMENT_CHECK`, `DESK_SCREENING`, `DESK_SCORING`, `SHORTLISTING`, `CLOSED`. `status` is its outcome so far: `RECEIVED`, `DOCUMENT_CHECK`, `DESK_SCREENING`, `ELIGIBLE`, `INELIGIBLE`, `SCORED`, `SHORTLISTED`, `NOT_SHORTLISTED`, `RETURNED` (8.13). A returned application keeps the stage it was returned from.
+- **Which value counts.** `AppraisalItem.result` and `.points` give the officer's value when one is recorded, else the system's; `is_overridden` says which. `basis_changed` flags that the answers changed after an officer recorded a value.
+- **Enforced in the database.** An item holds only the value of its kind; points and scores are never negative; ranks start at 1; an officer's value always has `decided_by` and `decided_at`.
+- **Access.** `Appraisal.get_queryset(queryset, user)` and `AppraisalItem.get_queryset` follow `Individual.get_queryset`: a user sees the appraisals of the individuals in their locations.
 
 ## Rights
 

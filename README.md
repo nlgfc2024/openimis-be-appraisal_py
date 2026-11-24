@@ -19,6 +19,18 @@ Place this repository next to `openimis-be_py` and add it to `openimis.json`:
 }
 ```
 
+### Rollout order
+
+The module reads other modules' new code at startup (msr_etl's signals, calcrule_validations' strategies,
+enrolment's scoring helpers), so a partial rollout won't boot. Deploy in this order:
+
+1. openimis-be-msr_etl_py#129: the Kobo submission and document signals.
+2. openimis-be-calcrule_validations_py#1, with openimis-be_py#21 pinning the hub to the nlgfc2024 fork.
+3. openimis-be-enrolment_py#14: the public scoring and quota helpers.
+4. openimis-be-household_validation_py#48: `requires_json_ext`, which selects shortlisted applicants.
+5. This module and openimis-fe-appraisal_js, with their `openimis.json` entries in the backend and frontend hubs.
+6. The programme's configuration (for UMEP, nlgfc2024/coremis-configs#11), applied last.
+
 ## Configuration
 
 `ModuleConfiguration` for module `appraisal` (layer `be`). Saved top-level keys replace the defaults. The

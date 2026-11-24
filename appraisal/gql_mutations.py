@@ -19,6 +19,7 @@ class ResultEnum(graphene.Enum):
 def _require(user, perms):
     if type(user) is AnonymousUser or not user.id or not perms or not user.has_perms(perms):
         raise PermissionDenied(_("unauthorized"))
+    AppraisalConfig.check_configured()
 
 
 class AnswerAppraisalItemMutation(BaseMutation):

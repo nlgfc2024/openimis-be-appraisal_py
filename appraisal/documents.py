@@ -90,14 +90,22 @@ def documents_problems(appraisal):
 
 
 @transaction.atomic
+def review_problem(appraisal):
+    """Why the appraisal's documents can't be reviewed now, or None (the rule review_document applies)."""
+    if appraisal.status not in OPEN_STATUSES:
+        return f"appraisal.screening_closed: the appraisal is {appraisal.get_status_display().lower()}"
+    return None
+
+
 def review_document(user, appraisal_id, document_id, status, comment=""):
     """Record an officer's VERIFIED or REJECTED for one document of the appraised application; returns the review."""
     appraisal = Appraisal.get_queryset(Appraisal.objects.filter(id=appraisal_id, is_deleted=False), user) \
         .select_for_update(of=("self",)).first()
     if appraisal is None:
         raise ValidationError("appraisal.not_found")
-    if appraisal.status not in OPEN_STATUSES:
-        raise ValidationError(f"appraisal.screening_closed: the appraisal is {appraisal.get_status_display().lower()}")
+    problem = review_problem(appraisal)
+    if problem:
+        raise ValidationError(problem)
     if status not in (Status.VERIFIED, Status.REJECTED):
         raise ValidationError(f"appraisal.invalid_document_status: {status}")
     comment = (comment or "").strip()
@@ -110,7 +118,8 @@ def review_document(user, appraisal_id, document_id, status, comment=""):
         raise ValidationError("appraisal.document_not_found: not a document of the appraised application")
     # A document still downloading, or that failed to download, has no file anyone could have opened
     if status == Status.VERIFIED and document.status != ApplicantDocument.Status.STORED:
-        raise ValidationError(f"appraisal.document_not_stored: the document is {document.get_status_display().lower()}, "
+        status_name = document.get_status_display().lower()
+        raise ValidationError(f"appraisal.document_not_stored: the document is {status_name}, "
                               "so it can be rejected but not verified")
     review = appraisal.document_reviews.filter(document=document, is_deleted=False).first() or \
         DocumentReview(appraisal=appraisal, document=document)

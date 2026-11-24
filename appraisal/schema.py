@@ -34,6 +34,7 @@ def _require_view(user):
     for perms in (AppraisalConfig.gql_query_appraisal_perms, IndividualConfig.gql_individual_search_perms):
         if not perms or not user.has_perms(perms):
             raise PermissionDenied(_("unauthorized"))
+    AppraisalConfig.check_configured()
 
 
 def _location_filter(parent_location, parent_location_level):

@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGraphQLTestCase
 from core.models import Role, RoleRight
@@ -7,7 +8,7 @@ from core.test_helpers import create_admin_role, create_test_interactive_user
 from individual.tests.test_helpers import create_individual, create_sp_role
 from location.test_helpers import assign_user_districts, create_test_village
 
-from appraisal.apps import RIGHT_APPRAISAL_RETURN, RIGHT_APPRAISAL_SCREEN, RIGHT_APPRAISAL_VIEW
+from appraisal.apps import AppraisalConfig, RIGHT_APPRAISAL_RETURN, RIGHT_APPRAISAL_SCREEN, RIGHT_APPRAISAL_VIEW
 from appraisal.models import Appraisal, AppraisalItem
 from appraisal.tests.test_review import make_appraisal
 
@@ -73,6 +74,10 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
 
     def setUp(self):
         super().setUp()
+        # Whatever the database's saved configuration, these tests run as configured
+        configured = patch.object(AppraisalConfig, "config_error", None)
+        configured.start()
+        self.addCleanup(configured.stop)
         self.appraisal_a, self.items_a = make_appraisal(self.admin, self.grace)
         self.appraisal_b, _ = make_appraisal(self.admin, self.john)
 
@@ -106,6 +111,15 @@ class AppraisalApiTest(openIMISGraphQLTestCase):
         self.assertEqual([n["node"]["individual"]["lastName"] for n in nodes], ["Banda"])
         content = self._appraisals(self.nobody_token)
         self.assertEqual(content["errors"][0]["message"], "unauthorized")
+
+    def test_an_invalid_saved_configuration_is_reported(self):
+        with patch.object(AppraisalConfig, "config_error", "programmes.UMEP.round must be a non-empty string."):
+            content = self._appraisals(self.admin_token)
+            self.assertEqual(content["errors"][0]["message"],
+                             "['appraisal.not_configured: programmes.UMEP.round must be a non-empty string.']")
+            with self.assertRaisesRegex(ValueError, "appraisal.not_configured"):
+                self.send_mutation_raw(f'''mutation {{ decideAppraisalEligibility(input: {{id: "{self.appraisal_a.id}"}})
+                    {{ internalId }} }}''', self.admin_token)
 
     def test_applicant_data_needs_the_individual_search_right_too(self):
         content = self._appraisals(self.appraisal_only_token)

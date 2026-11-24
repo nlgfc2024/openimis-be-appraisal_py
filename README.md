@@ -58,7 +58,14 @@ mutations answer `appraisal.not_configured` with the problems until the configur
            "scoring": {"type": "numeric_bands", "bands": [{"min": 5000001, "points": 15}, {"min": 3000000, "points": 12}]}}
         ]
       },
-      "shortlist": {"size": 1200, "per_city": {"Blantyre": 526, "Zomba": 104, "Lilongwe": 401, "Mzuzu": 169}}
+      "shortlist": {
+        "places": 1200,
+        "selection_strategy": {"source": "SELF", "spillover": false, "quotas": [
+          {"key": "zomba", "count": 104,
+           "when": [{"derived": "location_code", "answer": "biz_city", "location_type": "R", "value": "ZA"}]}
+        ]},
+        "individual_field": "umep_2026_r1_desk_appraisal"
+      }
     }
   }
 }
@@ -71,7 +78,7 @@ mutations answer `appraisal.not_configured` with the problems until the configur
 | `eligibility` | The prerequisite checklist. Each item has a unique `key` and a `label`, and either a `strategy` (a calcrule_validations strategy run on `field`, with `params` and optional `location_type`), a `check` (`youth_ownership`, `co_financing`, with `params`), or neither for an item only an officer judges. See "Pre-fill from the application". |
 | `inputs` | Score inputs derived from answers and documents (`months_since`, `all_answered`, `document_stored`). |
 | `scoring` | Score components: `key`, `label`, `field`, `weight` and `scoring` in enrolment's weighted-score shape (`mapping` or `numeric_bands`); the total is normalised to `normalise_to` (default 100). |
-| `shortlist` | Places: either `size` overall or `per_city` places by city name. `location_type` (default `R`) is the city's location type; `city` (`field`, `location_type`) takes the city from an answered business location code instead of the individual's location; `individual_field` names the individual's `json_ext` field that receives the outcome. |
+| `shortlist` | The round's rules, read from the current configuration when the shortlist runs (not kept with each appraisal): `places`, the round's shortlist places; optionally enrolment's `selection_strategy` dividing them (its `quotas`, e.g. per business city with `location_code` conditions, and `spillover`); and `individual_field`, the individual's `json_ext` field that receives the outcome. |
 
 Strategy and check names must exist; score rules are checked for shape here and in full by the scoring.
 
@@ -192,22 +199,25 @@ Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, st
   empty until an officer sets them, so nobody is ranked on a value no one has looked at.
 - **Total.** Each component's points are weighed by `weight / maximum points` and the sum is scaled to
   `normalise_to` (as enrolment's weighted score). With weights equal to the maximum points it is the plain sum.
-- **Officer points.** `answerAppraisalScore` sets a component's points (from 0 to its maximum) with the evidence
-  checked; the total follows. Only while the appraisal is `SCORED`.
-- **Refresh.** A new application or document rescores a scored appraisal. An officer's points stay, and a component
-  whose basis changed under them is flagged `basis_changed`; unchanged rescoring writes nothing.
+- **Officer value.** `answerAppraisalScore` records a component's value as the evidence shows it (e.g. `30` months
+  or `stable`), with the evidence checked; its points follow from the component's scoring rules, so they never depart
+  from the rubric, and the total follows. Only while the appraisal is `SCORED`. The value is kept in the item's
+  `json_ext.officer_value` (`officerValue`) and its points in `officer_points`.
+- **Refresh.** A new application or document rescores a scored appraisal. An officer's value stays, and a component
+  whose basis changed under it is flagged `basis_changed`; unchanged rescoring writes nothing.
 - **Shortlist.** `shortlistAppraisals` scores any appraisal still `ELIGIBLE`, then ranks the round's scored
-  appraisals by score (highest first), submission time, then Kobo id. The top `shortlist.per_city` places of each
-  city, or the top `shortlist.size` overall, become `SHORTLISTED`, the rest `NOT_SHORTLISTED`; `rank` is the
-  position in the city. A city with fewer applicants than places shortlists them all.
-  - The city is the `shortlist.location_type` ancestor (default `R`) of the business location answered to
-    `shortlist.city.field` (a `city.location_type` code, followed to its current code), or of the individual's
-    location when `city` isn't set.
-  - It refuses while a score is missing or its basis changed unreviewed, when an applicant's city (or no city) has
-    no places in `per_city`, and when the round's appraisals hold different shortlist rules.
-  - Each appraisal keeps the run (who, when, places, ranked and shortlisted per city) in `json_ext.shortlist`, which
-    the shortlist screen shows. With `shortlist.individual_field` set, the outcome is also written to that field of
-    the individual's `json_ext`, through the individual service, for field validation to select from.
+  appraisals by score (highest first), submission time, then Kobo id, and fills the round's `places` with
+  enrolment's selector (`allocate_places`): each `selection_strategy` quota in order takes its best-ranked members,
+  then, with `spillover`, the places left go to the next ranked. The rest are `NOT_SHORTLISTED`.
+  - The rules are the round's, read from the current configuration: it refuses when the programme no longer
+    configures that round (`appraisal.round_not_configured`) or has no shortlist.
+  - Each appraisal belongs to the first quota it matches (`json_ext.shortlist_group`, e.g. `zomba`), or to the
+    other places (none); `rank` is its position there.
+  - It refuses while a score is missing or its basis changed unreviewed.
+  - Each appraisal keeps the run (who, when, and per group the places, ranked and shortlisted) in
+    `json_ext.shortlist`, which the shortlist screen shows. With `shortlist.individual_field` set, the outcome is
+    also written to that field of the individual's `json_ext`, through the individual service, for field validation
+    and enrolment to select from.
   - Running it again recomputes, until the round is closed.
 - **Close.** `closeShortlist` makes the round's outcome final: its `SHORTLISTED` and `NOT_SHORTLISTED` appraisals move
   to stage `CLOSED` and the shortlist can't be run again for the round. It refuses while scored appraisals aren't
@@ -252,7 +262,7 @@ query {
 | `answerAppraisalItem` | `id` (item), `result` (`YES`/`NO`/`PENDING`), `evidence`, `comment` | `gql_mutation_screen_appraisal_perms` |
 | `decideAppraisalEligibility` | `id` (appraisal), `comment` | `gql_mutation_screen_appraisal_perms` |
 | `scoreAppraisals` | `programme`, `round`, `ids` (optional) | `gql_mutation_score_appraisal_perms` |
-| `answerAppraisalScore` | `id` (score item), `points`, `evidence`, `comment` | `gql_mutation_score_appraisal_perms` |
+| `answerAppraisalScore` | `id` (score item), `value`, `evidence`, `comment` | `gql_mutation_score_appraisal_perms` |
 | `shortlistAppraisals` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
 | `reviewApplicantDocument` | `appraisalId`, `documentId`, `status` (`VERIFIED`/`REJECTED`), `comment` | `gql_mutation_review_document_perms` |
 | `returnAppraisal` | `id`, `reason`, `actionRequired` | `gql_mutation_return_appraisal_perms` |

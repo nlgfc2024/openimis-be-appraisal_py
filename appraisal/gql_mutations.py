@@ -19,6 +19,7 @@ class ResultEnum(graphene.Enum):
 def _require(user, perms):
     if type(user) is AnonymousUser or not user.id or not perms or not user.has_perms(perms):
         raise PermissionDenied(_("unauthorized"))
+    AppraisalConfig.check_configured()
 
 
 class AnswerAppraisalItemMutation(BaseMutation):
@@ -80,13 +81,13 @@ class ScoreAppraisalsMutation(BaseMutation):
 
 
 class AnswerAppraisalScoreMutation(BaseMutation):
-    """An officer's points for one score component."""
+    """An officer's corrected value for one score component; its points follow from the scoring rules."""
     _mutation_class = "AnswerAppraisalScoreMutation"
     _mutation_module = "appraisal"
 
     class Input(OpenIMISMutation.Input):
         id = graphene.UUID(required=True, description="The score item")
-        points = graphene.Decimal(required=True)
+        value = graphene.String(required=True, description="The value the evidence shows, e.g. 30 or stable")
         evidence = graphene.String(required=True, description="Evidence or source checked")
         comment = graphene.String()
 
@@ -96,7 +97,7 @@ class AnswerAppraisalScoreMutation(BaseMutation):
 
     @classmethod
     def _mutate(cls, user, **data):
-        scoring.answer_score(user, data["id"], data["points"], data.get("evidence", ""), data.get("comment", ""))
+        scoring.answer_score(user, data["id"], data["value"], data.get("evidence", ""), data.get("comment", ""))
 
 
 class ShortlistAppraisalsMutation(BaseMutation):

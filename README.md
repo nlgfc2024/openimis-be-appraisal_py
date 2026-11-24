@@ -34,8 +34,11 @@ enrolment's scoring helpers), so a partial rollout won't boot. Deploy in this or
 ## Configuration
 
 `ModuleConfiguration` for module `appraisal` (layer `be`). Saved top-level keys replace the defaults. The
-configuration is checked when it is saved and again at start; every problem is reported with its path, e.g.
-`programmes.UMEP.eligibility[2].key`, and an invalid configuration stops the module from starting.
+configuration is checked when it is saved, and an invalid one is refused; every problem is reported with its
+path, e.g. `programmes.UMEP.eligibility[2].key`. It is checked again at start: a saved row that is invalid (written
+around the save check, or by an older version of the module) is logged as an error and disables the module's
+programmes. The backend still starts, the rights fall back to their defaults, and the module's queries and
+mutations answer `appraisal.not_configured` with the problems until the configuration is fixed.
 
 ```json
 {

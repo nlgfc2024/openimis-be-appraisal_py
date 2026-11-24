@@ -94,6 +94,16 @@ class DocumentCheckTest(DocumentsTestCase):
             with self.subTest(message=message), self.assertRaisesMessage(ValidationError, message):
                 documents.review_document(self.user, self.appraisal.id, document_id, status)
 
+    def test_a_document_without_its_file_can_be_rejected_but_not_verified(self):
+        for status in ("PENDING", "FAILED"):
+            ApplicantDocument.objects.filter(id=self.registration.id).update(status=status)
+            with self.subTest(status=status), self.assertRaisesMessage(ValidationError,
+                                                                       "appraisal.document_not_stored"):
+                documents.review_document(self.user, self.appraisal.id, self.registration.id, "VERIFIED")
+        review_ = documents.review_document(self.user, self.appraisal.id, self.registration.id, "REJECTED",
+                                            "The upload failed; ask for it again")
+        self.assertEqual(review_.status, "REJECTED")
+
     def test_only_a_decision_is_stored(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
             DocumentReview(appraisal=self.appraisal, document=self.national_id, status="SUBMITTED",

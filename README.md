@@ -81,18 +81,20 @@ An application imported or updated by msr_etl (`kobo_submission_applied`) gets a
 that reads its source, with one `ELIGIBILITY` item per checklist rule, proposed from its answers:
 
 - **`strategy`**: a calcrule_validations strategy run on the answer to `field`, with `params` and the submission
-  date as `reference_date` (ages, expiry dates). Success gives `YES`, failure `NO`; the basis keeps the answer and
+  date as `reference_date` (ages, expiry dates); a `reference_date` in `params`, such as a round's cut-off date,
+  replaces it. Success gives `YES`, failure `NO`; the basis keeps the answer and
   the strategy's note. With `location_type`, a location code is first followed to its current code
   (msr_etl `current_location_code`), so an answer given with a since-replaced temporary code still matches.
 - **`check`**: a built-in check reading an uploaded template; the template is the applicant's word, so the result
   stays `PENDING` with the proposal (`proposed`: `YES`/`NO`) and the figures in the basis.
-  - `youth_ownership`: a sole proprietor aged `min_age`-`max_age` (default 18-35) is `YES`, otherwise `NO`; a
-    partnership or company is proposed `YES` when owners of that age hold more than `min_share`% (default 80) in
-    the ownership template (`Age`, `Ownership %` columns).
-  - `co_financing`: proposed `YES` when the applicant contributes at least `min_share`% (default 30) of the
-    applicant and project contributions in the grant request template.
-  - Parameters: `template`, `columns`, the answer names (`legal_form_field`, `dob_field`, `sole_forms`,
-    `sources_field`) and the thresholds; defaults follow the Urban MEP form and templates.
+  - `youth_ownership`: a sole proprietor (`legal_form_field` answered with one of `sole_forms`) aged
+    `min_age`-`max_age` on `dob_field` is `YES`, otherwise `NO`; a partnership or company is proposed `YES` when
+    owners of that age hold more than `min_share`% in `template`, read from `columns` `age` and `share`.
+  - `co_financing`: proposed `YES` when the applicant contributes at least `min_share`% of the applicant and
+    project contributions in `template` (`columns` `applicant` and `project`), with the answer to the optional
+    `sources_field`. A filled contribution cell that isn't a number leaves it `PENDING`, never 0.
+  - Every parameter but `sources_field` is required and has no default, so each programme states its own rules;
+    see the UMEP configuration in coremis-configs.
 - **neither**: `PENDING` for the officer.
 
 A missing answer, or a template that is missing, still downloading or unreadable, is `PENDING` with the reason,
@@ -114,8 +116,10 @@ answered; `document_stored` is true once a document is stored, unknown (null) wh
 
 **Refreshing.** A repeat application, or a document stored later (`applicant_document_stored`), refreshes the
 system's values under the rules in force when the appraisal was created (`config_snapshot`). An officer's answer
-is never changed; an item whose basis changed after an officer answered it is flagged `basis_changed`. Nothing is
-written when nothing changed. An older application never replaces a newer one.
+is never changed; an item whose basis changed after an officer answered it, or once the eligibility decision is
+taken (`ELIGIBLE` onwards), is flagged `basis_changed` for review. Nothing is written when nothing changed. An
+older application never replaces a newer one: applications are ordered by submission time, which holds across
+Kobo forms, then by Kobo id.
 
 **Backfill.** `manage.py appraisal_backfill [--programme UMEP] [--dry-run]` appraises applications imported before
 the module or a programme was configured, from each person's latest application. It is safe to run again.

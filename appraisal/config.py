@@ -9,10 +9,23 @@ KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 PERMS_SUFFIX = "_perms"
 PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs", "scoring", "shortlist"}
 ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "location_type"}
-LOCATION_TYPES = ("R", "D", "W", "V")
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
 SHORTLIST_KEYS = {"size", "per_city"}
+# Rules of the whole round, read from the current configuration when used; an appraisal's snapshot keeps the rest
+ROUND_KEYS = {"shortlist"}
+
+
+def applicant_rules(programme):
+    """The rules an appraisal keeps from when it was created: the programme's, less the round's (ROUND_KEYS)."""
+    return {key: value for key, value in (programme or {}).items() if key not in ROUND_KEYS}
+
+
+def location_types():
+    """The location types the location module is configured with (its location_types, e.g. R, D, W, V)."""
+    from location.apps import LocationConfig
+
+    return tuple(LocationConfig.location_types or ())
 
 
 def _is_number(value):
@@ -71,8 +84,8 @@ def _eligibility_item(errors, item, path):
         errors.append(f"{path}.check must be one of: {', '.join(sorted(CHECKS))}.")
     if strategy and check:
         errors.append(f"{path} has both a strategy and a check; use one.")
-    if "location_type" in item and item["location_type"] not in LOCATION_TYPES:
-        errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
+    if "location_type" in item and item["location_type"] not in location_types():
+        errors.append(f"{path}.location_type must be one of: {', '.join(location_types())}.")
     if "field" in item and not _is_text(item["field"]):
         errors.append(f"{path}.field must be a non-empty string.")
     if strategy is not None and "field" not in item:

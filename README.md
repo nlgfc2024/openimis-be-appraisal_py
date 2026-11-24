@@ -240,7 +240,13 @@ Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, st
   appraisals. A decision (`decideAppraisalEligibility`) is held the same way (`appraisal_eligibility`), and the
   appraisal's checklist can't be answered or decided while it waits.
 - The task is approved or rejected in the Tasks screen by the task group handling source `appraisal`, under its
-  completion policy. The approver also needs `gql_mutation_approve_appraisal_perms`.
+  completion policy. It is a shared task (`benefit_plan_is_shared`): appraisals belong to no benefit plan, so
+  plan-restricted approvers still see it. With a tasks_management that has no shared tasks, it is a plain task.
+- Approving needs `gql_mutation_approve_appraisal_perms`, and the approver can't be the officer who asked
+  (`appraisal.own_change`). Both are checked before the task completes, so a refused approval leaves the task open
+  for someone who may approve it. The officer who asked may still reject it, to withdraw the change.
+- A decision waiting for approval can't be returned for action (`appraisal.approval_pending`); approve or reject it
+  first. The task names the applicant and the decision, not the national ID.
 - On approval the change is checked against the appraisals as they are now: the round must rank exactly as
   proposed, the checklist must still lead to the same decision with the same answers. It is then applied, the log
   naming who asked and who approved. Otherwise, or when rejected, nothing changes: the approval ends `FAILED` (with

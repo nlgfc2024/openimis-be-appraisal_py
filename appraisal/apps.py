@@ -89,8 +89,10 @@ class AppraisalConfig(AppConfig):
         from core.service_signals import ServiceSignalBindType
         from core.signals import bind_service_signal
 
-        from appraisal.approvals import on_task_complete
+        from appraisal.approvals import authorize_task_completion, on_task_complete
 
+        bind_service_signal("task_service.complete_task", authorize_task_completion,
+                            bind_type=ServiceSignalBindType.BEFORE)
         bind_service_signal("task_service.complete_task", on_task_complete, bind_type=ServiceSignalBindType.AFTER)
 
     def _validate_module_config(self, instance):

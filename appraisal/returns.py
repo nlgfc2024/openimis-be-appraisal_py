@@ -30,6 +30,10 @@ def return_appraisal(user, appraisal_id, reason, action_required):
     appraisal = _locked(user, appraisal_id)
     if appraisal.status not in RETURNABLE:
         raise ValidationError(f"appraisal.not_returnable: the appraisal is {appraisal.get_status_display().lower()}")
+    from appraisal.approvals import Kind as ApprovalKind, check_not_pending
+
+    # A decision awaiting approval is approved or rejected first, so no task is left open on a returned appraisal
+    check_not_pending(ApprovalKind.ELIGIBILITY, appraisal=appraisal)
     reason, action_required = (reason or "").strip(), (action_required or "").strip()
     if not reason or not action_required:
         raise ValidationError("appraisal.return_details_required: give the reason and the action required")

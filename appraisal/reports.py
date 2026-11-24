@@ -69,7 +69,8 @@ def appraisal_report(user, programme, round=None):
         if latest is None:
             return None
         round = latest
-    appraisals = list(appraisals.filter(round=round).select_related("individual__location"))
+    # The submission is read for each appraisal's conditional required documents
+    appraisals = list(appraisals.filter(round=round).select_related("individual__location", "submission"))
     if not appraisals:
         return None
     from appraisal.apps import AppraisalConfig

@@ -137,7 +137,6 @@ def decide_eligibility(user, appraisal_id, comment=""):
         request_approval(user, ApprovalKind.ELIGIBILITY, appraisal.programme, appraisal.round,
                          {"decision": decision, "results": results, "comment": (comment or "").strip()},
                          {"applicant": f"{individual.first_name} {individual.last_name}".strip(),
-                          "national_id": (individual.json_ext or {}).get("national_id"),
                           "decision": decision, "comment": (comment or "").strip()},
                          appraisal=appraisal)
         return appraisal

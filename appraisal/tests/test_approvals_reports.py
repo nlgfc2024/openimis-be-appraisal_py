@@ -1,6 +1,6 @@
 import json
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.test import TestCase
 from tasks_management.models import Task
 from tasks_management.services import TaskService
@@ -120,12 +120,27 @@ class ShortlistApprovalTest(ScoringTestCase):
         scoring.shortlist_round(self.user, "UMEP", "2026-R1")
         approval = AppraisalApproval.objects.get(kind="SHORTLIST")
 
-        complete(approval.task_id, viewer)
+        with self.assertRaisesMessage(PermissionDenied, "appraisal.approver_not_allowed"):
+            complete(approval.task_id, viewer)
 
+        # Refused before the task changed: it stays open for someone who may approve it
         approval.refresh_from_db()
-        self.assertEqual(approval.status, ApprovalStatus.FAILED)
-        self.assertIn("appraisal.approver_not_allowed", approval.outcome)
+        self.assertEqual(approval.status, ApprovalStatus.PENDING)
+        self.assertNotIn(Task.objects.get(id=approval.task_id).status, (Task.Status.COMPLETED, Task.Status.FAILED))
         self.assertEqual(self._statuses(), ["SCORED"] * 4)
+        complete(approval.task_id, self.supervisor)
+        self.assertEqual(AppraisalApproval.objects.get(id=approval.id).status, ApprovalStatus.APPROVED)
+
+    def test_the_officer_who_asked_cant_approve_but_can_withdraw(self):
+        scoring.shortlist_round(self.user, "UMEP", "2026-R1")
+        approval = AppraisalApproval.objects.get(kind="SHORTLIST")
+
+        with self.assertRaisesMessage(PermissionDenied, "appraisal.own_change"):
+            complete(approval.task_id, self.user)
+        self.assertEqual(AppraisalApproval.objects.get(id=approval.id).status, ApprovalStatus.PENDING)
+
+        complete(approval.task_id, self.user, failed=True)
+        self.assertEqual(AppraisalApproval.objects.get(id=approval.id).status, ApprovalStatus.REJECTED)
 
     def test_without_approval_the_shortlist_applies_at_once(self):
         configure(self, RULES)
@@ -182,6 +197,19 @@ class DecisionApprovalTest(TestCase):
         self.assertEqual(approval.status, ApprovalStatus.FAILED)
         self.assertIn("appraisal.answers_changed", approval.outcome)
         self.assertEqual(self._reload().status, "DESK_SCREENING")
+
+    def test_a_decision_awaiting_approval_cant_be_returned_and_the_task_carries_no_id(self):
+        from appraisal import returns
+
+        review.decide_eligibility(self.officer, self.appraisal.id)
+        approval = AppraisalApproval.objects.get(kind="ELIGIBILITY")
+
+        with self.assertRaisesMessage(ValidationError, "appraisal.approval_pending"):
+            returns.return_appraisal(self.officer, self.appraisal.id, "Unclear ID", "Upload a clearer copy")
+        self.assertNotIn("national_id", Task.objects.get(id=approval.task_id).json_ext)
+        complete(approval.task_id, self.supervisor, failed=True)
+        returns.return_appraisal(self.officer, self.appraisal.id, "Unclear ID", "Upload a clearer copy")
+        self.assertEqual(self._reload().status, "RETURNED")
 
     def test_a_rejected_decision_reopens_the_checklist(self):
         review.decide_eligibility(self.officer, self.appraisal.id)

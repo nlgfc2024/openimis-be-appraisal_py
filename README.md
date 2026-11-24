@@ -120,6 +120,57 @@ written when nothing changed. An older application never replaces a newer one.
 **Backfill.** `manage.py appraisal_backfill [--programme UMEP] [--dry-run]` appraises applications imported before
 the module or a programme was configured, from each person's latest application. It is safe to run again.
 
+## Desk screening
+
+An officer answers checklist items and records the eligibility decision (Operations Manual 8.2, Annex 2A):
+
+- **Answer** an item `YES`, `NO` or `PENDING`. `YES` and `NO` need the evidence or source checked; `PENDING`
+  needs the clarification asked for. The answer is recorded against the officer and time and clears
+  `basis_changed`; the appraisal moves to `DESK_SCREENING`.
+- **Decide** from the answers that count (the officer's, else the system's): any `NO` is `INELIGIBLE` (stage
+  `CLOSED`); otherwise any `PENDING` is `CLARIFICATION` (screening stays open); otherwise `ELIGIBLE` (stage
+  `DESK_SCORING`). Every rule needs an item, and an item whose basis changed must be answered again first. Each
+  decision is added to `json_ext.eligibility_decisions` with the officer, time, comment and the items behind it.
+- Items can be answered, and a decision recorded, only while screening is open (`RECEIVED`, `DOCUMENT_CHECK`,
+  `DESK_SCREENING`).
+
+## GraphQL API
+
+```graphql
+query {
+  appraisal(programme: "UMEP", status: DESK_SCREENING, search: "banda",
+            answers: ["primary_sector=energy"], first: 20, orderBy: ["-date_updated"]) {
+    totalCount
+    edges { node {
+      uuid programme round stage status eligibility score rank koboId submissionId
+      individual { uuid firstName lastName }
+      items(kind: "ELIGIBILITY") {
+        uuid key label systemResult basis basisChanged officerResult evidence comment decidedBy decidedAt
+        result isOverridden
+      }
+      history { date user subject changes }
+    } }
+  }
+}
+```
+
+- Filters: `programme`, `round`, `stage`, `status` (also `stage_In`, `status_In`), `eligibility` (the last three are enums, written unquoted), `individual_Id`, and `id` (the appraisal's UUID); `search` (name
+  or national ID); `answers` (`key=value` on the applicant's answers); `parentLocation` + `parentLocationLevel`;
+  `needsReview` (an item's basis changed). Needs `gql_query_appraisal_perms`; a user sees the appraisals of the
+  individuals in their locations.
+- `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the
+  values that count. `history` lists the changes to the appraisal and its items (field, old, new), newest first.
+- The application's answers and documents are read with msr_etl's `koboApplications(individualId)` and
+  `applicantDocuments(individualId)`, under msr_etl's own rights.
+
+| Mutation | Input | Right |
+| --- | --- | --- |
+| `answerAppraisalItem` | `id` (item), `result` (`YES`/`NO`/`PENDING`), `evidence`, `comment` | `gql_mutation_screen_appraisal_perms` |
+| `decideAppraisalEligibility` | `id` (appraisal), `comment` | `gql_mutation_screen_appraisal_perms` |
+
+Mutations are logged and run like every openIMIS mutation (`mutationLogs` by `clientMutationId`); a refused one
+reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.
+
 ## Rights
 
 | Right | Code | Config key |

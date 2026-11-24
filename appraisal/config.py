@@ -147,8 +147,8 @@ def _shortlist(errors, shortlist, path):
         errors.append(f"{path}.location_type must be one of: {', '.join(LOCATION_TYPES)}.")
     if "size" in shortlist and not _positive_int(shortlist["size"]):
         errors.append(f"{path}.size must be a positive whole number.")
-    per_city = shortlist.get("per_city")
-    if per_city is not None:
+    if "per_city" in shortlist:
+        per_city = shortlist["per_city"]
         if not isinstance(per_city, dict) or not per_city:
             errors.append(f"{path}.per_city must be a non-empty object of city: places.")
         else:

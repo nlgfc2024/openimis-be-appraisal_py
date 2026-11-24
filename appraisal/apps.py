@@ -59,6 +59,8 @@ class AppraisalConfig(AppConfig):
     gql_mutation_return_appraisal_perms = None
     gql_mutation_approve_appraisal_perms = None
     programmes = None
+    # Why the saved configuration couldn't be loaded; None when it loaded
+    config_error = None
 
     @classmethod
     def _load_config(cls, cfg):
@@ -70,9 +72,17 @@ class AppraisalConfig(AppConfig):
                 setattr(cls, field, cfg[field])
 
     def ready(self):
-        saved = _saved_config(self.name)
-        self._load_config({**copy.deepcopy(DEFAULT_CONFIG), **(saved or {})})
         register_validator(self.name, self._validate_module_config)
+        try:
+            saved = _saved_config(self.name)
+            self._load_config({**copy.deepcopy(DEFAULT_CONFIG), **(saved or {})})
+            AppraisalConfig.config_error = None
+        except ValidationError as exc:
+            # A broken saved row disables this module's programmes, not the backend; defaults are never used silently
+            AppraisalConfig.config_error = "; ".join(exc.messages)
+            self._load_config(copy.deepcopy(DEFAULT_CONFIG))
+            logger.error("The saved %s configuration is invalid, so no programme is appraised until it is fixed: %s",
+                         self.name, AppraisalConfig.config_error)
         from appraisal import receivers
 
         receivers.connect()
@@ -90,6 +100,12 @@ class AppraisalConfig(AppConfig):
             raise ValidationError({"config": exc.messages}) from exc
 
     @classmethod
+    def check_configured(cls):
+        """Refuse to work while the saved configuration is invalid (see ready)."""
+        if cls.config_error:
+            raise ValidationError(f"appraisal.not_configured: {cls.config_error}")
+
+    @classmethod
     def programme(cls, code):
         """The configuration of programme ``code``, or None when it isn't appraised."""
         return (cls.programmes or {}).get(code)
@@ -97,8 +113,8 @@ class AppraisalConfig(AppConfig):
 
 def _saved_config(module):
     """The saved configuration of ``module``; None when there is none, or no database yet. Unlike
-    ModuleConfiguration.get_or_default, a saved row that isn't a JSON object raises instead of falling back to the
-    defaults, so a broken configuration stops the module rather than quietly disabling its programmes."""
+    ModuleConfiguration.get_or_default, a saved row that isn't a JSON object raises instead of quietly falling back
+    to the defaults, so ready() can report it."""
     from django.db import DatabaseError
     from django.db.models import Q
 

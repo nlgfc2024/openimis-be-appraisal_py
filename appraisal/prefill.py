@@ -66,7 +66,8 @@ def evaluate_item(item, context):
     if value is None:
         return Outcome(Result.PENDING, {"field": name, "answer": None, "note": "No answer"})
     strategy = ValidationStrategyStorage.choose_strategy(item["strategy"])
-    checked = strategy.validate(name, value, reference_date=context.reference_date, **(item.get("params") or {}))
+    # A configured reference_date (e.g. a round's cut-off) replaces the submission date
+    checked = strategy.validate(name, value, **{"reference_date": context.reference_date, **(item.get("params") or {})})
     return Outcome(Result.YES if checked["success"] else Result.NO,
                    {"field": name, "answer": value, "strategy": item["strategy"], "note": checked["note"]})
 

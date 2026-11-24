@@ -6,7 +6,7 @@ from django.utils.translation import gettext as _
 from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
 
-from appraisal import review
+from appraisal import review, scoring
 from appraisal.apps import AppraisalConfig
 
 
@@ -61,6 +61,63 @@ class DecideAppraisalEligibilityMutation(BaseMutation):
         review.decide_eligibility(user, data["id"], data.get("comment", ""))
 
 
+class ScoreAppraisalsMutation(BaseMutation):
+    """Score (or rescore) the eligible appraisals of a programme round, or only ``ids`` (Annex 2B)."""
+    _mutation_class = "ScoreAppraisalsMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        programme = graphene.String(required=True)
+        round = graphene.String(required=True)
+        ids = graphene.List(graphene.UUID, description="Only these appraisals")
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_score_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.score_round(user, data["programme"], data["round"], data.get("ids"))
+
+
+class AnswerAppraisalScoreMutation(BaseMutation):
+    """An officer's corrected value for one score component; its points follow from the scoring rules."""
+    _mutation_class = "AnswerAppraisalScoreMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True, description="The score item")
+        value = graphene.String(required=True, description="The value the evidence shows, e.g. 30 or stable")
+        evidence = graphene.String(required=True, description="Evidence or source checked")
+        comment = graphene.String()
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_score_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.answer_score(user, data["id"], data["value"], data.get("evidence", ""), data.get("comment", ""))
+
+
+class ShortlistAppraisalsMutation(BaseMutation):
+    """Rank a programme round's scored appraisals and shortlist the top places."""
+    _mutation_class = "ShortlistAppraisalsMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        programme = graphene.String(required=True)
+        round = graphene.String(required=True)
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_shortlist_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.shortlist_round(user, data["programme"], data["round"])
+
+
 class ReopenAppraisalMutation(BaseMutation):
     """Reopen a decided screening to correct its eligibility decision, with the reason."""
     _mutation_class = "ReopenAppraisalMutation"
@@ -77,3 +134,21 @@ class ReopenAppraisalMutation(BaseMutation):
     @classmethod
     def _mutate(cls, user, **data):
         review.reopen_screening(user, data["id"], data["reason"])
+
+
+class CloseShortlistMutation(BaseMutation):
+    """Make a programme round's shortlist final: it can't be run again."""
+    _mutation_class = "CloseShortlistMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        programme = graphene.String(required=True)
+        round = graphene.String(required=True)
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_shortlist_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        scoring.close_shortlist(user, data["programme"], data["round"])

@@ -1,6 +1,6 @@
 """Shape of the appraisal module configuration. Every problem is reported with its path, e.g.
-``programmes.UMEP.eligibility[2].key``. Strategy and check names must exist; score rules are checked for
-shape (their points by the scoring)."""
+``programmes.UMEP.eligibility[2].key``. Strategy and check names must exist; score rules are checked with
+enrolment's validate_scoring."""
 import re
 
 from django.core.exceptions import ValidationError
@@ -11,7 +11,7 @@ PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs
 ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "location_type"}
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
-SHORTLIST_KEYS = {"size", "per_city"}
+SHORTLIST_KEYS = {"places", "selection_strategy", "individual_field"}
 # Rules of the whole round, read from the current configuration when used; an appraisal's snapshot keeps the rest
 ROUND_KEYS = {"shortlist"}
 
@@ -128,6 +128,13 @@ def _score_component(errors, item, path):
         errors.append(f"{path}.weight must be a positive number.")
     if not isinstance(item.get("scoring"), dict):
         errors.append(f"{path}.scoring must be an object.")
+        return
+    from enrolment.ranking import validate_scoring
+
+    try:
+        validate_scoring(item["scoring"], f"{path}.scoring")
+    except ValidationError as exc:
+        errors.extend(exc.messages)
 
 
 def _scoring(errors, scoring, path):
@@ -146,22 +153,25 @@ def _scoring(errors, scoring, path):
 
 
 def _shortlist(errors, shortlist, path):
+    """``places`` for the round, optionally divided by enrolment's ``selection_strategy`` (its quotas, e.g. per
+    city, and ``spillover``), and the individual's ``individual_field`` that receives the outcome."""
     if not isinstance(shortlist, dict):
         errors.append(f"{path} must be an object.")
         return
     _unexpected(errors, shortlist, SHORTLIST_KEYS, path)
-    if "size" not in shortlist and "per_city" not in shortlist:
-        errors.append(f"{path} needs size, per_city, or both.")
-    if "size" in shortlist and not _positive_int(shortlist["size"]):
-        errors.append(f"{path}.size must be a positive whole number.")
-    if "per_city" in shortlist:
-        per_city = shortlist["per_city"]
-        if not isinstance(per_city, dict) or not per_city:
-            errors.append(f"{path}.per_city must be a non-empty object of city: places.")
-        else:
-            for city, places in per_city.items():
-                if not _is_text(city) or not _positive_int(places):
-                    errors.append(f"{path}.per_city['{city}'] must be a positive whole number of places.")
+    if not _positive_int(shortlist.get("places")):
+        errors.append(f"{path}.places must be a positive whole number: the round's shortlist places.")
+    if "selection_strategy" in shortlist:
+        from django.core.exceptions import ValidationError as Invalid
+        from enrolment.ranking import normalise_selection_strategy
+        from individual.models import Individual
+
+        try:
+            normalise_selection_strategy(shortlist["selection_strategy"], Individual)
+        except Invalid as exc:
+            errors.extend(f"{path}.selection_strategy: {message}" for message in exc.messages)
+    if "individual_field" in shortlist and not _is_text(shortlist["individual_field"]):
+        errors.append(f"{path}.individual_field must be the name of the individual's json_ext field.")
 
 
 def _programme(errors, code, programme, path):

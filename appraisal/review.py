@@ -10,7 +10,7 @@ eligibility decision. Called by the GraphQL mutations; rights are checked there,
   not those already scored or shortlisted.
 - The decision follows the Annex 2A rule from the answers that count (the officer's, else the system's): any No
   is INELIGIBLE, otherwise any Pending is CLARIFICATION, otherwise ELIGIBLE. An item whose basis changed since
-  the officer answered it must be answered again first.
+  the officer answered it must be answered again first. An eligible appraisal is scored at once (appraisal.scoring).
 """
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -134,6 +134,10 @@ def decide_eligibility(user, appraisal_id, comment=""):
              "pending": [key for key, result in results.items() if result == Result.PENDING]}
     appraisal.json_ext = {**(appraisal.json_ext or {}), DECISION_LOG: [*log, entry]}
     appraisal.save(user=user)
+    if decision == Eligibility.ELIGIBLE:
+        from appraisal.scoring import score_appraisal
+
+        score_appraisal(appraisal, user)
     return appraisal
 
 

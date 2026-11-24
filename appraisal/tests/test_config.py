@@ -28,7 +28,15 @@ PROGRAMME = {
              "scoring": {"type": "numeric_bands", "bands": [{"min": 5000001, "points": 15}]}},
         ],
     },
-    "shortlist": {"size": 1200, "per_city": {"Blantyre": 526, "Zomba": 104, "Lilongwe": 401, "Mzuzu": 169}},
+    "shortlist": {
+        "places": 1200,
+        "selection_strategy": {"source": "SELF", "spillover": False, "quotas": [
+            {"key": city, "count": count, "when": [
+                {"derived": "location_code", "answer": "biz_city", "location_type": "R", "value": code}]}
+            for city, code, count in (("blantyre", "325", 526), ("zomba", "ZA", 104), ("lilongwe", "LL", 401),
+                                      ("mzuzu", "MZ", 169))]},
+        "individual_field": "umep_2026_r1_desk_appraisal",
+    },
 }
 
 
@@ -90,12 +98,13 @@ class ProgrammeConfigTest(SimpleTestCase):
             (_with(["scoring", "components"], []), "programmes.UMEP.scoring.components must be a non-empty list."),
             (_with(["scoring", "components", 0, "weight"], 0),
              "programmes.UMEP.scoring.components[0].weight must be a positive number."),
-            (_with(["shortlist"], {}), "programmes.UMEP.shortlist needs size, per_city, or both."),
-            (_with(["shortlist", "per_city", "Zomba"], 0),
-             "programmes.UMEP.shortlist.per_city['Zomba'] must be a positive whole number of places."),
-            (_with(["shortlist", "size"], True), "programmes.UMEP.shortlist.size must be a positive whole number."),
-            (_with(["shortlist", "per_city"], None),
-             "programmes.UMEP.shortlist.per_city must be a non-empty object of city: places."),
+            (_with(["shortlist", "places"], 0),
+             "programmes.UMEP.shortlist.places must be a positive whole number: the round's shortlist places."),
+            (_with(["shortlist", "selection_strategy", "quotas", 0, "count"], 0),
+             "programmes.UMEP.shortlist.selection_strategy: enrolment_ranking.selection_strategy.quotas[0].count "
+             "must be a positive integer."),
+            (_with(["shortlist", "per_city"], {"Zomba": 1}),
+             "programmes.UMEP.shortlist has unsupported keys: per_city."),
         ]
         for programmes, message in cases:
             with self.subTest(message=message):

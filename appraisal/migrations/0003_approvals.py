@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('tasks_management', '0011_alter_historicaltask_date_created_and_more'),
+        ('tasks_management', '0011_task_benefit_plan_ownership'),
         ('appraisal', '0002_documents_and_returns'),
     ]
 

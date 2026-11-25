@@ -4,7 +4,7 @@ import graphene
 from graphene_django import DjangoObjectType
 
 from core import ExtendedConnection
-from appraisal.models import Appraisal, AppraisalItem
+from appraisal.models import Appraisal, AppraisalItem, AppraisalReturn, DocumentReview
 
 # Bookkeeping fields left out of the change history
 _UNTRACKED = {"version", "date_updated", "user_updated", "date_created", "user_created", "id"}
@@ -71,6 +71,41 @@ class AppraisalItemGQLType(DjangoObjectType):
         return Decimal(str(maximum_points(rule["scoring"]))) if rule else None
 
 
+class DocumentCheckGQLType(graphene.ObjectType):
+    """One document of the document check: uploaded (with its review) or required and missing (OUTSTANDING)."""
+    document_type = graphene.String()
+    label = graphene.String()
+    required = graphene.Boolean()
+    document_id = graphene.UUID(description="The msr_etl ApplicantDocument; null when outstanding")
+    filename = graphene.String()
+    download_status = graphene.String(description="msr_etl's PENDING / STORED / FAILED")
+    status = graphene.String(description="SUBMITTED, VERIFIED, REJECTED or OUTSTANDING")
+    comment = graphene.String()
+    reviewed_by = graphene.String()
+    reviewed_at = graphene.DateTime()
+
+
+class AppraisalReturnGQLType(DjangoObjectType):
+    uuid = graphene.String(source="uuid")
+    requested_by = graphene.String()
+    resubmitted_by = graphene.String()
+    is_open = graphene.Boolean()
+
+    class Meta:
+        model = AppraisalReturn
+        fields = ("id", "stage", "previous_status", "reason", "action_required", "returned_at", "resubmitted_at",
+                  "resubmission_note")
+
+    def resolve_requested_by(self, info):
+        return self.requested_by.username
+
+    def resolve_resubmitted_by(self, info):
+        return self.resubmitted_by.username if self.resubmitted_by_id else None
+
+    def resolve_is_open(self, info):
+        return self.is_open
+
+
 class AppraisalChangeGQLType(graphene.ObjectType):
     date = graphene.DateTime()
     user = graphene.String()
@@ -111,6 +146,9 @@ class AppraisalGQLType(DjangoObjectType):
     can_reopen = graphene.Boolean(description="The user may reopen the recorded decision")
     can_score = graphene.Boolean(description="The user may correct a score item's value now")
     can_rescore = graphene.Boolean(description="The user may (re)score the appraisal now")
+    can_review_documents = graphene.Boolean(description="The user may verify or reject its documents now")
+    can_return = graphene.Boolean(description="The user may return the appraisal for action now")
+    can_resubmit = graphene.Boolean(description="The user may resubmit the returned appraisal")
     shortlist_group = graphene.String(description="The quota the last shortlist ranked it in (e.g. its city), or null")
     items = graphene.List(AppraisalItemGQLType, kind=graphene.String(),
                           description="Active items, in the order of the appraisal's rules")
@@ -118,6 +156,9 @@ class AppraisalGQLType(DjangoObjectType):
     submission_id = graphene.UUID(description="The msr_etl KoboSubmission appraised")
     kobo_id = graphene.Int()
     json_ext = graphene.JSONString()
+    documents = graphene.List(DocumentCheckGQLType, description="The document check")
+    documents_complete = graphene.Boolean(description="Every required document verified and none rejected")
+    returns = graphene.List(AppraisalReturnGQLType, description="Returns for action, newest first")
 
     class Meta:
         model = Appraisal
@@ -161,6 +202,21 @@ class AppraisalGQLType(DjangoObjectType):
 
         return _allowed(info, "gql_mutation_score_appraisal_perms") and self.status in SCORABLE
 
+    def resolve_can_review_documents(self, info):
+        from appraisal.documents import review_problem
+
+        return _allowed(info, "gql_mutation_review_document_perms") and review_problem(self) is None
+
+    def resolve_can_return(self, info):
+        from appraisal.returns import return_problem
+
+        return _allowed(info, "gql_mutation_return_appraisal_perms") and return_problem(self) is None
+
+    def resolve_can_resubmit(self, info):
+        from appraisal.returns import can_resubmit
+
+        return _allowed(info, "gql_mutation_return_appraisal_perms") and can_resubmit(self)
+
     def resolve_shortlist_group(self, info):
         from appraisal.scoring import SHORTLIST_GROUP
 
@@ -180,12 +236,42 @@ class AppraisalGQLType(DjangoObjectType):
     def resolve_json_ext(self, info):
         return self.json_ext
 
+    def resolve_documents(self, info):
+        from appraisal.documents import document_check
+
+        rows = []
+        for entry in document_check(self):
+            document, review = entry["document"], entry["review"]
+            rows.append(DocumentCheckGQLType(
+                document_type=entry["document_type"], label=entry["label"], required=entry["required"],
+                document_id=document.id if document else None, filename=document.filename if document else None,
+                download_status=document.status if document else None, status=entry["status"],
+                comment=review.comment if review else None,
+                reviewed_by=review.reviewed_by.username if review else None,
+                reviewed_at=review.reviewed_at if review else None))
+        return rows
+
+    def resolve_documents_complete(self, info):
+        from appraisal.documents import documents_problems
+
+        return not documents_problems(self)
+
+    def resolve_returns(self, info):
+        return self.returns.filter(is_deleted=False).select_related("requested_by", "resubmitted_by") \
+            .order_by("-returned_at")
+
     def resolve_history(self, info):
         entries = _changes(self.history.select_related("user_updated").order_by("history_date"),
                            lambda record: "appraisal")
         item_history = AppraisalItem.history.filter(appraisal_id=self.id).select_related("user_updated") \
             .order_by("id", "history_date")
         entries += _changes(item_history, lambda record: record.key)
+        reviews = DocumentReview.history.filter(appraisal_id=self.id).select_related("user_updated", "document") \
+            .order_by("id", "history_date")
+        entries += _changes(reviews, lambda record: f"document:{record.document.document_type}")
+        returns = AppraisalReturn.history.filter(appraisal_id=self.id).select_related("user_updated") \
+            .order_by("id", "history_date")
+        entries += _changes(returns, lambda record: "return")
         return sorted(entries, key=lambda entry: entry["date"], reverse=True)[:HISTORY_LIMIT]
 
 

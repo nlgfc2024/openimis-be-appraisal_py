@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 PERMS_SUFFIX = "_perms"
-PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs", "scoring", "shortlist"}
+PROGRAMME_KEYS = {"description", "source_types", "round", "eligibility", "inputs", "scoring", "shortlist", "documents"}
 ELIGIBILITY_KEYS = {"key", "label", "field", "strategy", "check", "params", "location_type"}
 SCORING_KEYS = {"normalise_to", "components"}
 COMPONENT_KEYS = {"key", "label", "field", "weight", "scoring"}
@@ -152,6 +152,29 @@ def _scoring(errors, scoring, path):
     _keyed_items(errors, components, f"{path}.components", _score_component)
 
 
+def _documents(errors, documents, path):
+    if not isinstance(documents, dict):
+        errors.append(f"{path} must be an object.")
+        return
+    _unexpected(errors, documents, {"required"}, path)
+    required = documents.get("required", [])
+    if not isinstance(required, list):
+        errors.append(f"{path}.required must be a list of document types.")
+        return
+    for index, entry in enumerate(required):
+        entry_path = f"{path}.required[{index}]"
+        if isinstance(entry, str) and entry.strip():
+            continue
+        if not isinstance(entry, dict) or not _is_text(entry.get("type")):
+            errors.append(f"{entry_path} must be a document type, or an object with a type and a when.")
+            continue
+        _unexpected(errors, entry, {"type", "when"}, entry_path)
+        when = entry.get("when")
+        if when is not None and (not isinstance(when, dict) or not _is_text(when.get("field"))
+                                 or not isinstance(when.get("in"), list) or not when["in"]):
+            errors.append(f"{entry_path}.when must be an object with a field and a non-empty in list.")
+
+
 def _shortlist(errors, shortlist, path):
     """``places`` for the round, optionally divided by enrolment's ``selection_strategy`` (its quotas, e.g. per
     city, and ``spillover``), and the individual's ``individual_field`` that receives the outcome."""
@@ -193,6 +216,8 @@ def _programme(errors, code, programme, path):
         _scoring(errors, programme["scoring"], f"{path}.scoring")
     if "shortlist" in programme:
         _shortlist(errors, programme["shortlist"], f"{path}.shortlist")
+    if "documents" in programme:
+        _documents(errors, programme["documents"], f"{path}.documents")
 
 
 def validate_programmes(programmes, path="programmes"):

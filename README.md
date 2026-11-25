@@ -163,6 +163,32 @@ An officer answers checklist items and records the eligibility decision (Operati
   right): the decision is cleared, the appraisal goes back to `DESK_SCREENING`, and the reason is added to
   `json_ext.reopened` with who and when. An appraisal already scored or shortlisted can't be reopened.
 
+## Document check and return for action
+
+**Document check** (Operations Manual 8.1d), when the programme sets `documents`:
+
+```json
+"documents": {"required": [
+  "doc_national_id",
+  {"type": "ownership_template", "when": {"field": "legal_form", "in": ["partnership_group", "limited_company"]}}
+]}
+```
+
+- `required` lists document types (Kobo file question names); an entry with `when` is required only when that
+  answer is one of `in` (a multiple-choice answer when any of its choices is).
+- Each uploaded document is `SUBMITTED` until an officer marks it `VERIFIED` or `REJECTED` (with the reason,
+  `reviewApplicantDocument`); a required document the application lacks is `OUTSTANDING`. Only a document stored
+  in the MIS (msr_etl `STORED`) can be verified; one still downloading or failed can only be rejected
+  (`appraisal.document_not_stored`). The first review moves a received appraisal to `DOCUMENT_CHECK`.
+- The eligibility decision is refused (`appraisal.documents_incomplete`) until every required document is
+  `VERIFIED` and none is `REJECTED`. A programme without `documents` has no document check.
+
+**Return for action** (8.8d): `returnAppraisal` sends an appraisal still being screened or scored back with the
+reason and the action required. It becomes `RETURNED`, keeping its stage, and nothing can be answered, decided or
+scored until `resubmitAppraisal` closes the return (who, when, a note) and restores its status. A newer application
+from the applicant resubmits it automatically. At most one return is open at a time; every return stays on the
+appraisal, and returns and document reviews appear in its `history`.
+
 ## Desk scoring and the shortlist
 
 Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, stage 2):
@@ -230,10 +256,12 @@ query {
   (`decision` the checklist leads to, the `ineligible`, `pending`, `unanswered` and `changed` keys, and `problem`,
   the refusal that stops the decision now).
   For scoring, `canScore` (correct a value now), `canRescore`, and `shortlistGroup`, the quota the last shortlist
-  ranked the appraisal in. `appraisalRounds` lists the configured rounds and the rounds with appraisals the user
+  ranked the appraisal in. `canReviewDocuments`, `canReturn` and `canResubmit` follow the document and return rules, and `decisionPreview.problem`
+  includes an incomplete document check. `appraisalRounds` lists the configured rounds and the rounds with appraisals the user
   may see (`programme`, `round`, `configured`, `appraisals`), for choosing a round.
 - `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the
-  values that count; score items also give `maxPoints`. `history` lists the changes to the appraisal and its
+  values that count; score items also give `maxPoints`. `documents` is the document check (`documentsComplete`),
+  `returns` the returns for action. `history` lists the changes to the appraisal and its
   items (field, old, new), newest first.
 - The application's answers and documents are read with msr_etl's `koboApplications(individualId)` and
   `applicantDocuments(individualId)`, under msr_etl's own rights.
@@ -245,6 +273,9 @@ query {
 | `scoreAppraisals` | `programme`, `round`, `ids` (optional) | `gql_mutation_score_appraisal_perms` |
 | `answerAppraisalScore` | `id` (score item), `value`, `evidence`, `comment` | `gql_mutation_score_appraisal_perms` |
 | `shortlistAppraisals` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
+| `reviewApplicantDocument` | `appraisalId`, `documentId`, `status` (`VERIFIED`/`REJECTED`), `comment` | `gql_mutation_review_document_perms` |
+| `returnAppraisal` | `id`, `reason`, `actionRequired` | `gql_mutation_return_appraisal_perms` |
+| `resubmitAppraisal` | `id`, `note` | `gql_mutation_return_appraisal_perms` |
 | `closeShortlist` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
 | `reopenAppraisal` | `id` (appraisal), `reason` | `gql_mutation_return_appraisal_perms` |
 

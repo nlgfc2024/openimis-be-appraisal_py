@@ -6,7 +6,7 @@ from django.utils.translation import gettext as _
 from core.gql.gql_mutations.base_mutation import BaseMutation
 from core.schema import OpenIMISMutation
 
-from appraisal import review, scoring
+from appraisal import documents, returns, review, scoring
 from appraisal.apps import AppraisalConfig
 
 
@@ -116,6 +116,69 @@ class ShortlistAppraisalsMutation(BaseMutation):
     @classmethod
     def _mutate(cls, user, **data):
         scoring.shortlist_round(user, data["programme"], data["round"])
+
+
+class DocumentStatusEnum(graphene.Enum):
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+
+
+class ReviewApplicantDocumentMutation(BaseMutation):
+    """An officer's VERIFIED or REJECTED for one document of the appraised application."""
+    _mutation_class = "ReviewApplicantDocumentMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        appraisal_id = graphene.UUID(required=True)
+        document_id = graphene.UUID(required=True)
+        status = graphene.Field(DocumentStatusEnum, required=True)
+        comment = graphene.String(description="Required for REJECTED: why")
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_review_document_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        status = getattr(data["status"], "value", data["status"])
+        documents.review_document(user, data["appraisal_id"], data["document_id"], status, data.get("comment", ""))
+
+
+class ReturnAppraisalMutation(BaseMutation):
+    """Return an appraisal for action, with the reason and the action required."""
+    _mutation_class = "ReturnAppraisalMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True)
+        reason = graphene.String(required=True)
+        action_required = graphene.String(required=True)
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_return_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        returns.return_appraisal(user, data["id"], data["reason"], data["action_required"])
+
+
+class ResubmitAppraisalMutation(BaseMutation):
+    """Close a returned appraisal's return and restore its status."""
+    _mutation_class = "ResubmitAppraisalMutation"
+    _mutation_module = "appraisal"
+
+    class Input(OpenIMISMutation.Input):
+        id = graphene.UUID(required=True)
+        note = graphene.String()
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        _require(user, AppraisalConfig.gql_mutation_return_appraisal_perms)
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        returns.resubmit_appraisal(user, data["id"], data.get("note", ""))
 
 
 class ReopenAppraisalMutation(BaseMutation):

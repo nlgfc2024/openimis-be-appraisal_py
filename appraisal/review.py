@@ -10,7 +10,8 @@ eligibility decision. Called by the GraphQL mutations; rights are checked there,
   not those already scored or shortlisted.
 - The decision follows the Annex 2A rule from the answers that count (the officer's, else the system's): any No
   is INELIGIBLE, otherwise any Pending is CLARIFICATION, otherwise ELIGIBLE. An item whose basis changed since
-  the officer answered it must be answered again first. An eligible appraisal is scored at once (appraisal.scoring).
+  the officer answered it must be answered again first, and the document check must be complete
+  (appraisal.documents). An eligible appraisal is scored at once (appraisal.scoring).
 """
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -54,7 +55,8 @@ def decision_preview(appraisal):
     """What the checklist leads to now (Annex 2A), as decide_eligibility applies it: ``decision`` from the answers
     that count (any No is INELIGIBLE, else any Pending CLARIFICATION, else ELIGIBLE; None while an item is
     unanswered), the ``results`` by key, the ``ineligible``, ``pending``, ``unanswered`` and ``changed`` keys, and
-    ``problem``, the refusal that stops the decision now, or None."""
+    ``problem``, the refusal that stops the decision now (an unanswered or changed item, or an incomplete document
+    check), or None."""
     checklist = appraisal.items.filter(kind=AppraisalItem.Kind.ELIGIBILITY, is_deleted=False)
     items = {item.key: item for item in checklist}
     keys = [rule["key"] for rule in (appraisal.config_snapshot or {}).get("eligibility", [])]
@@ -76,6 +78,13 @@ def decision_preview(appraisal):
         problem = f"appraisal.answers_changed: review {', '.join(changed)} again"
     else:
         problem = None
+    if problem is None:
+        from appraisal.documents import documents_problems
+
+        problems = documents_problems(appraisal)
+        if problems:
+            listed = ", ".join(f"{label} ({status.lower()})" for label, status in problems)
+            problem = f"appraisal.documents_incomplete: {listed}"
     return {"decision": decision, "results": results, "unanswered": unanswered, "changed": changed,
             "ineligible": [key for key, result in results.items() if result == Result.NO],
             "pending": [key for key, result in results.items() if result == Result.PENDING], "problem": problem}

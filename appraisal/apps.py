@@ -86,6 +86,14 @@ class AppraisalConfig(AppConfig):
         from appraisal import receivers
 
         receivers.connect()
+        from core.service_signals import ServiceSignalBindType
+        from core.signals import bind_service_signal
+
+        from appraisal.approvals import authorize_task_completion, on_task_complete
+
+        bind_service_signal("task_service.complete_task", authorize_task_completion,
+                            bind_type=ServiceSignalBindType.BEFORE)
+        bind_service_signal("task_service.complete_task", on_task_complete, bind_type=ServiceSignalBindType.AFTER)
 
     def _validate_module_config(self, instance):
         """Reject an invalid configuration on save, before the next restart reads it."""

@@ -19,6 +19,7 @@
 - Closing the shortlist makes the round's outcome final: its appraisals move to stage CLOSED and the shortlist
   can't be run for the round again.
 """
+import math
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.core.exceptions import ValidationError
@@ -187,29 +188,46 @@ def _order(appraisal):
     return -appraisal.score, submitted.timestamp() if submitted else 0, kobo, str(appraisal.id)
 
 
+def _membership(appraisals, rules):
+    """(quotas, spillover, {quota key: individual ids}, {appraisal id: the first quota it matches or None}) under the
+    shortlist ``rules``; no quotas when they set no selection_strategy."""
+    from enrolment.ranking import normalise_selection_strategy, quota_members
+    from individual.models import Individual
+
+    strategy = (rules or {}).get("selection_strategy")
+    if not strategy:
+        return [], True, {}, {appraisal.id: None for appraisal in appraisals}
+    strategy = normalise_selection_strategy(strategy, Individual)
+    quotas = strategy["quotas"]
+    members = quota_members(Individual.objects.filter(id__in=[a.individual_id for a in appraisals]), quotas)
+
+    def first_quota(appraisal):
+        return next((quota["key"] for quota in quotas if appraisal.individual_id in members[quota["key"]]), None)
+
+    return quotas, strategy["spillover"], members, {appraisal.id: first_quota(appraisal) for appraisal in appraisals}
+
+
+def quota_groups(appraisals, rules):
+    """({appraisal id: its quota or None}, {quota: its places}) under the shortlist ``rules``, for the report."""
+    quotas, _spillover, _members, group_of = _membership(appraisals, rules)
+    if not rules:
+        return group_of, {}
+    if not quotas:
+        return group_of, {None: rules["places"]}
+    return group_of, {quota["key"]: quota.get("count", math.floor(rules["places"] * quota.get("percentage", 0) / 100))
+                      for quota in quotas}
+
+
 def _allocate(appraisals, rules):
     """Fill the round's places with enrolment's selector. Returns (selected individual ids, groups, group of each
     appraisal), the groups [{"group", "places", "ranked", "shortlisted"}] per quota then the places left over
     (group None)."""
-    from enrolment.ranking import allocate_places, normalise_selection_strategy, quota_members
-    from individual.models import Individual
+    from enrolment.ranking import allocate_places
 
     places = rules["places"]
+    quotas, spillover, members, group_of = _membership(appraisals, rules)
     ranked = [appraisal.individual_id for appraisal in appraisals]
-    strategy = rules.get("selection_strategy")
-    if strategy:
-        strategy = normalise_selection_strategy(strategy, Individual)
-        quotas, spillover = strategy["quotas"], strategy["spillover"]
-        members = quota_members(Individual.objects.filter(id__in=ranked), quotas)
-    else:
-        quotas, spillover, members = [], True, {}
     selected, fill = allocate_places(ranked, quotas, members, places, spillover)
-
-    # Each appraisal belongs to the first quota it matches, else to the places left over
-    def first_quota(appraisal):
-        return next((quota["key"] for quota in quotas if appraisal.individual_id in members[quota["key"]]), None)
-
-    group_of = {appraisal.id: first_quota(appraisal) for appraisal in appraisals}
     groups = [{"group": bucket["key"], "places": bucket["reserved"],
                "ranked": sum(1 for group in group_of.values() if group == bucket["key"]),
                "shortlisted": bucket["filled"]} for bucket in fill["buckets"]]
@@ -228,13 +246,9 @@ def _check_round_open(programme, round):
         raise ValidationError(f"appraisal.shortlist_closed: the {programme} {round} shortlist is closed")
 
 
-@transaction.atomic
-def shortlist_round(user, programme, round):
-    """Rank the round's scored appraisals and shortlist its places, by quota (e.g. per city) when configured.
-
-    Returns {group: {"places", "ranked", "shortlisted"}}; the group is the quota key, or None for the other places.
-    """
-    _check_round_open(programme, round)
+def _rank_round(user, programme, round):
+    """Score the round's eligible appraisals and rank the scored ones under the round's rules. Returns (appraisals
+    best first, rules, outcomes [(appraisal, group, rank, shortlisted)], groups)."""
     rules = round_rules(programme, round)
     pending = Appraisal.objects.filter(programme=programme, round=round, status=Status.ELIGIBLE, is_deleted=False)
     for appraisal in _locked(pending):
@@ -254,17 +268,67 @@ def shortlist_round(user, programme, round):
 
     appraisals.sort(key=_order)
     selected, groups, group_of = _allocate(appraisals, rules)
-    positions = {}
+    positions, outcomes = {}, []
     for appraisal in appraisals:
         group = group_of[appraisal.id]
         positions[group] = positions.get(group, 0) + 1
-        _set_shortlisted(appraisal, positions[group], appraisal.individual_id in selected, group,
-                         rules.get("individual_field"), user)
-    log = {"by": user.username, "at": timezone.now().isoformat(), "groups": groups}
+        outcomes.append((appraisal, group, positions[group], appraisal.individual_id in selected))
+    return appraisals, rules, outcomes, groups
+
+
+def _proposal(outcomes):
+    """The shortlist as data, to keep for approval and compare when it is applied."""
+    return [{"id": str(appraisal.id), "group": group, "rank": rank, "shortlisted": shortlisted,
+             "score": str(appraisal.score)} for appraisal, group, rank, shortlisted in outcomes]
+
+
+def _summary(groups):
+    return {group["group"]: {key: group[key] for key in ("places", "ranked", "shortlisted")} for group in groups}
+
+
+def _apply_shortlist(user, appraisals, rules, outcomes, groups, approved_by=None, requested_by=None):
+    for appraisal, group, rank, shortlisted in outcomes:
+        _set_shortlisted(appraisal, rank, shortlisted, group, rules.get("individual_field"), user)
+    log = {"by": (requested_by or user).username, "at": timezone.now().isoformat(), "groups": groups}
+    if approved_by is not None:
+        log["approved_by"] = approved_by.username
     for appraisal in appraisals:
         appraisal.json_ext = {**(appraisal.json_ext or {}), SHORTLIST_LOG: log}
         appraisal.save(user=user)
-    return {group["group"]: {key: group[key] for key in ("places", "ranked", "shortlisted")} for group in groups}
+
+
+@transaction.atomic
+def shortlist_round(user, programme, round):
+    """Rank the round's scored appraisals and shortlist its places, by quota (e.g. per city) when configured; when
+    the programme requires approval, the shortlist waits for it (appraisal.approvals) instead.
+
+    Returns {group: {"places", "ranked", "shortlisted"}}; the group is the quota key, or None for the other places.
+    """
+    from appraisal.apps import AppraisalConfig
+    from appraisal.approvals import Kind as ApprovalKind, approval_required, check_not_pending, request_approval
+
+    _check_round_open(programme, round)
+    check_not_pending(ApprovalKind.SHORTLIST, programme, round)
+    appraisals, rules, outcomes, groups = _rank_round(user, programme, round)
+    if approval_required(AppraisalConfig.programme(programme), ApprovalKind.SHORTLIST):
+        request_approval(user, ApprovalKind.SHORTLIST, programme, round, {"ranking": _proposal(outcomes)}, {
+            "groups": groups,
+            "ranked": sum(group["ranked"] for group in groups),
+            "shortlisted": sum(group["shortlisted"] for group in groups),
+        })
+        return _summary(groups)
+    _apply_shortlist(user, appraisals, rules, outcomes, groups)
+    return _summary(groups)
+
+
+def apply_shortlist_approval(approval, user):
+    """Apply an approved shortlist, if the round still ranks as it did when it was asked for."""
+    _check_round_open(approval.programme, approval.round)
+    appraisals, rules, outcomes, groups = _rank_round(user, approval.programme, approval.round)
+    if _proposal(outcomes) != approval.proposal.get("ranking"):
+        raise ValidationError("appraisal.shortlist_changed: scores or applicants changed since the shortlist was "
+                              "asked for; run it again")
+    _apply_shortlist(user, appraisals, rules, outcomes, groups, approved_by=user, requested_by=approval.requested_by)
 
 
 def _set_shortlisted(appraisal, rank, shortlisted, group, individual_field, user):
@@ -291,7 +355,10 @@ def _record_on_individual(individual, field, status, user):
 @transaction.atomic
 def close_shortlist(user, programme, round):
     """Make the round's shortlist final; returns how many appraisals it closed."""
+    from appraisal.approvals import Kind as ApprovalKind, check_not_pending
+
     _check_round_open(programme, round)
+    check_not_pending(ApprovalKind.SHORTLIST, programme, round)
     appraisals = list(_locked(Appraisal.objects.filter(programme=programme, round=round, status__in=RANKED,
                                                        is_deleted=False)))
     unranked = [appraisal for appraisal in appraisals if appraisal.status == Status.SCORED]

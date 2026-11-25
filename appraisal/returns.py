@@ -28,6 +28,13 @@ def return_problem(appraisal):
     """Why the appraisal can't be returned for action now, or None (the rule return_appraisal applies)."""
     if appraisal.status not in RETURNABLE:
         return f"appraisal.not_returnable: the appraisal is {appraisal.get_status_display().lower()}"
+    from appraisal.approvals import Kind as ApprovalKind, check_not_pending
+
+    # A decision awaiting approval is approved or rejected first, so no task is left open on a returned appraisal
+    try:
+        check_not_pending(ApprovalKind.ELIGIBILITY, appraisal=appraisal)
+    except ValidationError as exc:
+        return exc.messages[0]
     return None
 
 

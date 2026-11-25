@@ -4,7 +4,7 @@ import graphene
 from graphene_django import DjangoObjectType
 
 from core import ExtendedConnection
-from appraisal.models import Appraisal, AppraisalItem, AppraisalReturn, DocumentReview
+from appraisal.models import Appraisal, AppraisalApproval, AppraisalItem, AppraisalReturn, DocumentReview
 
 # Bookkeeping fields left out of the change history
 _UNTRACKED = {"version", "date_updated", "user_updated", "date_created", "user_created", "id"}
@@ -106,6 +106,89 @@ class AppraisalReturnGQLType(DjangoObjectType):
         return self.is_open
 
 
+class AppraisalApprovalGQLType(DjangoObjectType):
+    """A shortlist or eligibility decision awaiting, or given, a supervisor's approval."""
+    uuid = graphene.String(source="uuid")
+    summary = graphene.JSONString(description="What the supervisor is shown")
+    requested_by = graphene.String()
+    decided_by = graphene.String()
+    task_id = graphene.UUID(description="The tasks_management Task")
+    appraisal_id = graphene.UUID()
+
+    class Meta:
+        model = AppraisalApproval
+        fields = ("id", "kind", "programme", "round", "status", "requested_at", "decided_at", "outcome")
+
+    def resolve_summary(self, info):
+        return self.summary
+
+    def resolve_requested_by(self, info):
+        return self.requested_by.username
+
+    def resolve_decided_by(self, info):
+        return self.decided_by.username if self.decided_by_id else None
+
+    def resolve_task_id(self, info):
+        return self.task_id
+
+    def resolve_appraisal_id(self, info):
+        return self.appraisal_id
+
+
+class CountGQLType(graphene.ObjectType):
+    key = graphene.String(description="The value counted; empty when not given")
+    count = graphene.Int()
+
+
+class ReportBreakdownGQLType(graphene.ObjectType):
+    key = graphene.String()
+    label = graphene.String()
+    counts = graphene.List(CountGQLType)
+
+
+class ReportCityGQLType(graphene.ObjectType):
+    city = graphene.String(description="Empty for applicants outside a city")
+    places = graphene.Int(description="Shortlist places of the city, when set")
+    total = graphene.Int()
+    eligible = graphene.Int()
+    ineligible = graphene.Int()
+    clarification = graphene.Int()
+    scored = graphene.Int()
+    shortlisted = graphene.Int()
+
+
+class ReportDocumentsGQLType(graphene.ObjectType):
+    """Appraisals still being screened, by the state of their document check."""
+    incomplete = graphene.Int()
+    outstanding = graphene.Int()
+    to_review = graphene.Int()
+    rejected = graphene.Int()
+
+
+class ReportAwaitingGQLType(graphene.ObjectType):
+    """Appraisals and changes awaiting action (Operations Manual 8.12)."""
+    not_started = graphene.Int()
+    documents_to_review = graphene.Int()
+    documents_outstanding = graphene.Int()
+    clarification = graphene.Int()
+    answers_changed = graphene.Int()
+    returned = graphene.Int()
+    eligibility_approval = graphene.Int()
+    shortlist_approval = graphene.Int()
+
+
+class AppraisalReportGQLType(graphene.ObjectType):
+    programme = graphene.String()
+    round = graphene.String()
+    total = graphene.Int()
+    by_status = graphene.List(CountGQLType)
+    by_stage = graphene.List(CountGQLType)
+    by_city = graphene.List(ReportCityGQLType)
+    breakdowns = graphene.List(ReportBreakdownGQLType)
+    documents = graphene.Field(ReportDocumentsGQLType)
+    awaiting = graphene.Field(ReportAwaitingGQLType)
+
+
 class AppraisalChangeGQLType(graphene.ObjectType):
     date = graphene.DateTime()
     user = graphene.String()
@@ -159,6 +242,9 @@ class AppraisalGQLType(DjangoObjectType):
     documents = graphene.List(DocumentCheckGQLType, description="The document check")
     documents_complete = graphene.Boolean(description="Every required document verified and none rejected")
     returns = graphene.List(AppraisalReturnGQLType, description="Returns for action, newest first")
+    pending_approval = graphene.Field(AppraisalApprovalGQLType,
+                                      description="The eligibility decision awaiting approval, if any")
+    approvals = graphene.List(AppraisalApprovalGQLType, description="Eligibility decisions sent for approval")
 
     class Meta:
         model = Appraisal
@@ -260,6 +346,14 @@ class AppraisalGQLType(DjangoObjectType):
         return self.returns.filter(is_deleted=False).select_related("requested_by", "resubmitted_by") \
             .order_by("-returned_at")
 
+    def resolve_pending_approval(self, info):
+        return self.approvals.filter(status=AppraisalApproval.Status.PENDING, is_deleted=False) \
+            .select_related("requested_by").first()
+
+    def resolve_approvals(self, info):
+        return self.approvals.filter(is_deleted=False).select_related("requested_by", "decided_by") \
+            .order_by("-requested_at")
+
     def resolve_history(self, info):
         entries = _changes(self.history.select_related("user_updated").order_by("history_date"),
                            lambda record: "appraisal")
@@ -272,6 +366,9 @@ class AppraisalGQLType(DjangoObjectType):
         returns = AppraisalReturn.history.filter(appraisal_id=self.id).select_related("user_updated") \
             .order_by("id", "history_date")
         entries += _changes(returns, lambda record: "return")
+        approvals = AppraisalApproval.history.filter(appraisal_id=self.id).select_related("user_updated") \
+            .order_by("id", "history_date")
+        entries += _changes(approvals, lambda record: "approval")
         return sorted(entries, key=lambda entry: entry["date"], reverse=True)[:HISTORY_LIMIT]
 
 

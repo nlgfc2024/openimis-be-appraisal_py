@@ -24,6 +24,7 @@ setup(
         'openimis-be-msr_etl',
         'openimis-be-calcrule_validations',
         'openimis-be-enrolment',
+        'openimis-be-tasks_management',
     ],
     classifiers=[
         'Environment :: Web Environment',

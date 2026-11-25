@@ -22,8 +22,9 @@ from appraisal.gql_mutations import (
     ScoreAppraisalsMutation,
     ShortlistAppraisalsMutation,
 )
-from appraisal.gql_queries import AppraisalGQLType, AppraisalRoundGQLType
-from appraisal.models import Appraisal
+from appraisal.gql_queries import AppraisalApprovalGQLType, AppraisalGQLType, AppraisalReportGQLType, \
+    AppraisalRoundGQLType
+from appraisal.models import Appraisal, AppraisalApproval
 
 
 def _require_view(user):
@@ -68,6 +69,9 @@ def _answer_filter(answers):
     return condition
 
 
+APPROVALS_LIMIT = 20
+
+
 class Query(graphene.ObjectType):
     appraisal = OrderedDjangoFilterConnectionField(
         AppraisalGQLType,
@@ -79,6 +83,33 @@ class Query(graphene.ObjectType):
         parent_location_level=graphene.Int(),
         needs_review=graphene.Boolean(description="Only appraisals with an item whose basis changed"),
     )
+
+    appraisal_approvals = graphene.List(
+        AppraisalApprovalGQLType, programme=graphene.String(required=True), round=graphene.String(),
+        kind=graphene.String(), description="Approvals of a programme round, newest first",
+    )
+    appraisal_report = graphene.Field(
+        AppraisalReportGQLType, programme=graphene.String(required=True),
+        round=graphene.String(description="The latest round when not given"),
+    )
+
+    def resolve_appraisal_approvals(self, info, programme, round=None, kind=None):
+        user = info.context.user
+        _require_view(user)
+        approvals = AppraisalApproval.objects.filter(programme=programme, is_deleted=False)
+        if round:
+            approvals = approvals.filter(round=round)
+        if kind:
+            approvals = approvals.filter(kind=kind)
+        return AppraisalApproval.get_queryset(approvals, user).select_related("requested_by", "decided_by") \
+            .order_by("-requested_at")[:APPROVALS_LIMIT]
+
+    def resolve_appraisal_report(self, info, programme, round=None):
+        from appraisal.reports import appraisal_report
+
+        user = info.context.user
+        _require_view(user)
+        return appraisal_report(user, programme, round)
 
     appraisal_rounds = graphene.List(AppraisalRoundGQLType,
                                      description="Configured rounds and rounds with appraisals, for choosing one")

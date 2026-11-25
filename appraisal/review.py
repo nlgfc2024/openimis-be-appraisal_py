@@ -12,6 +12,8 @@ eligibility decision. Called by the GraphQL mutations; rights are checked there,
   is INELIGIBLE, otherwise any Pending is CLARIFICATION, otherwise ELIGIBLE. An item whose basis changed since
   the officer answered it must be answered again first, and the document check must be complete
   (appraisal.documents). An eligible appraisal is scored at once (appraisal.scoring).
+- When the programme requires approval of decisions, the decision waits for it (appraisal.approvals) and the
+  checklist can't be answered meanwhile.
 """
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -38,8 +40,11 @@ def _locked_appraisal(appraisal_id, user):
 
 
 def _check_open(appraisal):
+    from appraisal.approvals import Kind as ApprovalKind, check_not_pending
+
     if appraisal.status not in OPEN_STATUSES:
         raise ValidationError(f"appraisal.screening_closed: the appraisal is {appraisal.get_status_display().lower()}")
+    check_not_pending(ApprovalKind.ELIGIBILITY, appraisal=appraisal)
 
 
 def screening_problem(appraisal):
@@ -124,12 +129,7 @@ def answer_item(user, item_id, result, evidence="", comment=""):
     return item
 
 
-@transaction.atomic
-def decide_eligibility(user, appraisal_id, comment=""):
-    """Record the eligibility decision from the checklist; returns the appraisal."""
-    appraisal = _locked_appraisal(appraisal_id, user)
-    _check_open(appraisal)
-    decision, results = _decision(appraisal)
+def _apply_decision(appraisal, user, decision, results, comment, requested_by=None, approved_by=None):
     appraisal.eligibility = decision
     appraisal.stage, appraisal.status = {
         Eligibility.ELIGIBLE: (Stage.DESK_SCORING, Status.ELIGIBLE),
@@ -137,17 +137,54 @@ def decide_eligibility(user, appraisal_id, comment=""):
         Eligibility.CLARIFICATION: (Stage.DESK_SCREENING, Status.DESK_SCREENING),
     }[decision]
     log = (appraisal.json_ext or {}).get(DECISION_LOG, [])
-    entry = {"decision": decision, "by": user.username, "at": timezone.now().isoformat(),
+    entry = {"decision": decision, "by": (requested_by or user).username, "at": timezone.now().isoformat(),
              "comment": (comment or "").strip(),
              "ineligible": [key for key, result in results.items() if result == Result.NO],
              "pending": [key for key, result in results.items() if result == Result.PENDING]}
+    if approved_by is not None:
+        entry["approved_by"] = approved_by.username
     appraisal.json_ext = {**(appraisal.json_ext or {}), DECISION_LOG: [*log, entry]}
     appraisal.save(user=user)
     if decision == Eligibility.ELIGIBLE:
         from appraisal.scoring import score_appraisal
 
         score_appraisal(appraisal, user)
+
+
+@transaction.atomic
+def decide_eligibility(user, appraisal_id, comment=""):
+    """Record the eligibility decision from the checklist, or ask for its approval when the programme requires it;
+    returns the appraisal."""
+    from appraisal.approvals import Kind as ApprovalKind, approval_required, request_approval
+
+    appraisal = _locked_appraisal(appraisal_id, user)
+    _check_open(appraisal)
+    decision, results = _decision(appraisal)
+    from appraisal.apps import AppraisalConfig
+
+    if approval_required(AppraisalConfig.programme(appraisal.programme), ApprovalKind.ELIGIBILITY):
+        individual = appraisal.individual
+        request_approval(user, ApprovalKind.ELIGIBILITY, appraisal.programme, appraisal.round,
+                         {"decision": decision, "results": results, "comment": (comment or "").strip()},
+                         {"applicant": f"{individual.first_name} {individual.last_name}".strip(),
+                          "decision": decision, "comment": (comment or "").strip()},
+                         appraisal=appraisal)
+        return appraisal
+    _apply_decision(appraisal, user, decision, results, comment)
     return appraisal
+
+
+def apply_decision_approval(approval, user):
+    """Apply an approved eligibility decision, if the checklist still leads to it with the same answers."""
+    appraisal = Appraisal.objects.filter(id=approval.appraisal_id, is_deleted=False) \
+        .select_for_update(of=("self",)).first()
+    if appraisal is None or appraisal.status not in OPEN_STATUSES:
+        raise ValidationError("appraisal.screening_closed: the appraisal is no longer being screened")
+    decision, results = _decision(appraisal)
+    if decision != approval.proposal.get("decision") or results != approval.proposal.get("results"):
+        raise ValidationError("appraisal.answers_changed: the checklist changed since the decision was asked for")
+    _apply_decision(appraisal, user, decision, results, approval.proposal.get("comment"),
+                    requested_by=approval.requested_by, approved_by=user)
 
 
 @transaction.atomic

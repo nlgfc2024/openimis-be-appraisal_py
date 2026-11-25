@@ -1,3 +1,340 @@
 # openIMIS Backend Appraisal Module
 
-Desk appraisal of programme applications for openIMIS. Work is tracked in issue #1.
+`openimis-be-appraisal` runs the desk appraisal of programme applications: the checks, scoring and shortlist
+between an application's import and physical verification. It is programme-neutral; each programme's
+checklist, score rules and shortlist come from configuration. Urban MEP (UMEP) is the first programme, with
+applications imported from Kobo by `msr_etl` (Urban MEP Operations Manual, chapter 8 and Annex 2A/2B).
+
+Built in work packages tracked in [#1](https://github.com/nlgfc2024/openimis-be-appraisal_py/issues/1). This
+version holds the configuration, the rights, the data model and the pre-fill from imported applications.
+
+## Installation
+
+Place this repository next to `openimis-be_py` and add it to `openimis.json`:
+
+```json
+{
+  "name": "appraisal",
+  "pip": "-e ../openimis-be-appraisal_py"
+}
+```
+
+### Rollout order
+
+The module reads other modules' new code at startup (msr_etl's signals, calcrule_validations' strategies,
+enrolment's scoring helpers), so a partial rollout won't boot. Deploy in this order:
+
+1. openimis-be-msr_etl_py#129: the Kobo submission and document signals.
+2. openimis-be-calcrule_validations_py#1, with openimis-be_py#21 pinning the hub to the nlgfc2024 fork.
+3. openimis-be-enrolment_py#14: the public scoring and quota helpers.
+4. openimis-be-household_validation_py#48: `requires_json_ext`, which selects shortlisted applicants.
+5. This module and openimis-fe-appraisal_js, with their `openimis.json` entries in the backend and frontend hubs.
+6. The programme's configuration (for UMEP, nlgfc2024/coremis-configs#11), applied last.
+
+## Configuration
+
+`ModuleConfiguration` for module `appraisal` (layer `be`). Saved top-level keys replace the defaults. The
+configuration is checked when it is saved, and an invalid one is refused; every problem is reported with its
+path, e.g. `programmes.UMEP.eligibility[2].key`. It is checked again at start: a saved row that is invalid (written
+around the save check, or by an older version of the module) is logged as an error and disables the module's
+programmes. The backend still starts, the rights fall back to their defaults, and the module's queries and
+mutations answer `appraisal.not_configured` with the problems until the configuration is fixed.
+
+```json
+{
+  "programmes": {
+    "UMEP": {
+      "source_types": ["kobo"],
+      "round": "2026-R1",
+      "eligibility": [
+        {"key": "youth_age", "label": "Youth aged 18-35", "field": "dob",
+         "strategy": "AgeRangeValidationStrategy", "params": {"min": 18, "max": 35}},
+        {"key": "co_financing", "label": "Minimum 30% co-financing", "strategy": null}
+      ],
+      "scoring": {
+        "normalise_to": 100,
+        "components": [
+          {"key": "turnover", "label": "Annual turnover", "field": "turnover_past_12m_mwk", "weight": 15,
+           "scoring": {"type": "numeric_bands", "bands": [{"min": 5000001, "points": 15}, {"min": 3000000, "points": 12}]}}
+        ]
+      },
+      "shortlist": {
+        "places": 1200,
+        "selection_strategy": {"source": "SELF", "spillover": false, "quotas": [
+          {"key": "zomba", "count": 104,
+           "when": [{"derived": "location_code", "answer": "biz_city", "location_type": "R", "value": "ZA"}]}
+        ]},
+        "individual_field": "umep_2026_r1_desk_appraisal"
+      },
+      "approval": {"shortlist": true, "eligibility": false},
+      "report": {"breakdowns": [{"key": "sector", "label": "Sector", "field": "primary_sector"}]}
+    }
+  }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `source_types` | msr_etl sources whose applications this programme appraises. |
+| `round` | The intake round; one appraisal per person, programme and round. |
+| `eligibility` | The prerequisite checklist. Each item has a unique `key` and a `label`, and either a `strategy` (a calcrule_validations strategy run on `field`, with `params` and optional `location_type`), a `check` (`youth_ownership`, `co_financing`, with `params`), or neither for an item only an officer judges. See "Pre-fill from the application". |
+| `inputs` | Score inputs derived from answers and documents (`months_since`, `all_answered`, `document_stored`). |
+| `scoring` | Score components: `key`, `label`, `field`, `weight` and `scoring` in enrolment's weighted-score shape (`mapping` or `numeric_bands`); the total is normalised to `normalise_to` (default 100). |
+| `shortlist` | The round's rules, read from the current configuration when the shortlist runs (not kept with each appraisal): `places`, the round's shortlist places; optionally enrolment's `selection_strategy` dividing them (its `quotas`, e.g. per business city with `location_code` conditions, and `spillover`); and `individual_field`, the individual's `json_ext` field that receives the outcome. |
+| `documents` | The document check: `required` document types, optionally only `when` an answer is one of `in`. |
+| `approval` | Round rule, read from the current configuration. `shortlist` and/or `eligibility`: `true` holds the shortlist / each eligibility decision for a supervisor's approval in tasks_management. |
+| `report` | Round rule, read from the current configuration. `breakdowns`: application fields (`key`, `label`, `field`) the report counts appraisals by, e.g. the sector. |
+
+Strategy and check names must exist; score rules are checked for shape here and in full by the scoring.
+
+## Data model
+
+Every model keeps every change in a history table (`simple_history`) with the user and time (Operations
+Manual 8.11), and are soft-deleted (`is_deleted`).
+
+| Model | Holds |
+| --- | --- |
+| `Appraisal` (`HistoryBusinessModel`) | One per person, `programme` and `round` (unique among active appraisals): the `submission` appraised (msr_etl `KoboSubmission`), `stage`, `status`, `eligibility`, `score`, `rank`, and `config_snapshot`, the programme's rules when it was created. |
+| `AppraisalApproval` (`HistoryModel`) | A shortlist (per round) or eligibility decision (per appraisal) held for approval: `kind`, `status` (`PENDING`, `APPROVED`, `REJECTED`, `FAILED` with the `outcome`), the change in `proposal`, the `summary` the supervisor sees, its tasks_management `task`, and who asked and decided when. One pending per round or appraisal. |
+| `AppraisalItem` (`HistoryModel`) | One per checklist item (`ELIGIBILITY`, a result: `YES` / `NO` / `PENDING`) or score component (`SCORE`, points), unique per appraisal, kind and `key`. The system's value with its `basis`, and the officer's value with `evidence`, `comment`, `decided_by` and `decided_at`. |
+
+- **Stage and status.** `stage` is where the application is: `DOCUMENT_CHECK`, `DESK_SCREENING`, `DESK_SCORING`, `SHORTLISTING`, `CLOSED`. `status` is its outcome so far: `RECEIVED`, `DOCUMENT_CHECK`, `DESK_SCREENING`, `ELIGIBLE`, `INELIGIBLE`, `SCORED`, `SHORTLISTED`, `NOT_SHORTLISTED`, `RETURNED` (8.13). A returned application keeps the stage it was returned from.
+- **Which value counts.** `AppraisalItem.result` and `.points` give the officer's value when one is recorded, else the system's; `is_overridden` says which. `basis_changed` flags that the answers changed after an officer recorded a value.
+- **Enforced in the database.** An item holds only the value of its kind; points and scores are never negative; ranks start at 1; an officer's value always has `decided_by` and `decided_at`.
+- **Access.** `Appraisal.get_queryset(queryset, user)` and `AppraisalItem.get_queryset` follow `Individual.get_queryset`: a user sees the appraisals of the individuals in their locations.
+
+## Pre-fill from the application
+
+An application imported or updated by msr_etl (`kobo_submission_applied`) gets an appraisal for each programme
+that reads its source, with one `ELIGIBILITY` item per checklist rule, proposed from its answers:
+
+- **`strategy`**: a calcrule_validations strategy run on the answer to `field`, with `params` and the submission
+  date as `reference_date` (ages, expiry dates); a `reference_date` in `params`, such as a round's cut-off date,
+  replaces it. Success gives `YES`, failure `NO`; the basis keeps the answer and
+  the strategy's note. With `location_type`, a location code is first followed to its current code
+  (msr_etl `current_location_code`), so an answer given with a since-replaced temporary code still matches.
+- **`check`**: a built-in check reading an uploaded template; the template is the applicant's word, so the result
+  stays `PENDING` with the proposal (`proposed`: `YES`/`NO`) and the figures in the basis.
+  - `youth_ownership`: a sole proprietor (`legal_form_field` answered with one of `sole_forms`) aged
+    `min_age`-`max_age` on `dob_field` is `YES`, otherwise `NO`; a partnership or company is proposed `YES` when
+    owners of that age hold more than `min_share`% in `template`, read from `columns` `age` and `share`.
+  - `co_financing`: proposed `YES` when the applicant contributes at least `min_share`% of the applicant and
+    project contributions in `template` (`columns` `applicant` and `project`), with the answer to the optional
+    `sources_field`. A filled contribution cell that isn't a number leaves it `PENDING`, never 0.
+  - Every parameter but `sources_field` is required and has no default, so each programme states its own rules;
+    see the UMEP configuration in coremis-configs.
+- **neither**: `PENDING` for the officer.
+
+A missing answer, or a template that is missing, still downloading or unreadable, is `PENDING` with the reason,
+never `NO`.
+
+**Score inputs.** The value of every score component's `field` is stored in `json_ext.score_inputs`: the answer,
+or a value the programme's `inputs` derive:
+
+```json
+"inputs": {
+  "months_in_operation": {"derive": "months_since", "field": "business_start_date"},
+  "has_business_bank_account": {"derive": "all_answered", "fields": ["business_account_name", "business_bank", "business_account_number"]},
+  "has_bank_statement": {"derive": "document_stored", "document_types": ["bank_statement_3m"]}
+}
+```
+
+`months_since` counts whole months to the submission date; `all_answered` is true when every question is
+answered; `document_stored` is true once a document is stored, unknown (null) while one is downloading.
+
+**Refreshing.** A repeat application, or a document stored later (`applicant_document_stored`), refreshes the
+system's values under the rules in force when the appraisal was created (`config_snapshot`). An officer's answer
+is never changed; an item whose basis changed after an officer answered it, or once the eligibility decision is
+taken (`ELIGIBLE` onwards), is flagged `basis_changed` for review. Nothing is written when nothing changed. An
+older application never replaces a newer one: applications are ordered by submission time, which holds across
+Kobo forms, then by Kobo id.
+
+**Backfill.** `manage.py appraisal_backfill [--programme UMEP] [--dry-run]` appraises applications imported before
+the module or a programme was configured, from each person's latest application. It is safe to run again.
+
+## Desk screening
+
+An officer answers checklist items and records the eligibility decision (Operations Manual 8.2, Annex 2A):
+
+- **Answer** an item `YES`, `NO` or `PENDING`. `YES` and `NO` need the evidence or source checked; `PENDING`
+  needs the clarification asked for. The answer is recorded against the officer and time and clears
+  `basis_changed`; the appraisal moves to `DESK_SCREENING`.
+- **Decide** from the answers that count (the officer's, else the system's): any `NO` is `INELIGIBLE` (stage
+  `CLOSED`); otherwise any `PENDING` is `CLARIFICATION` (screening stays open); otherwise `ELIGIBLE` (stage
+  `DESK_SCORING`). Every rule needs an item, and an item whose basis changed must be answered again first. Each
+  decision is added to `json_ext.eligibility_decisions` with the officer, time, comment and the items behind it.
+- Items can be answered, and a decision recorded, only while screening is open (`RECEIVED`, `DOCUMENT_CHECK`,
+  `DESK_SCREENING`).
+- **Reopen** an `ELIGIBLE` or `INELIGIBLE` appraisal to correct a wrong decision, with a reason (the return
+  right): the decision is cleared, the appraisal goes back to `DESK_SCREENING`, and the reason is added to
+  `json_ext.reopened` with who and when. An appraisal already scored or shortlisted can't be reopened.
+
+## Document check and return for action
+
+**Document check** (Operations Manual 8.1d), when the programme sets `documents`:
+
+```json
+"documents": {"required": [
+  "doc_national_id",
+  {"type": "ownership_template", "when": {"field": "legal_form", "in": ["partnership_group", "limited_company"]}}
+]}
+```
+
+- `required` lists document types (Kobo file question names); an entry with `when` is required only when that
+  answer is one of `in` (a multiple-choice answer when any of its choices is).
+- Each uploaded document is `SUBMITTED` until an officer marks it `VERIFIED` or `REJECTED` (with the reason,
+  `reviewApplicantDocument`); a required document the application lacks is `OUTSTANDING`. Only a document stored
+  in the MIS (msr_etl `STORED`) can be verified; one still downloading or failed can only be rejected
+  (`appraisal.document_not_stored`). The first review moves a received appraisal to `DOCUMENT_CHECK`.
+- The eligibility decision is refused (`appraisal.documents_incomplete`) until every required document is
+  `VERIFIED` and none is `REJECTED`. A programme without `documents` has no document check.
+
+**Return for action** (8.8d): `returnAppraisal` sends an appraisal still being screened or scored back with the
+reason and the action required. It becomes `RETURNED`, keeping its stage, and nothing can be answered, decided or
+scored until `resubmitAppraisal` closes the return (who, when, a note) and restores its status. A newer application
+from the applicant resubmits it automatically. At most one return is open at a time; every return stays on the
+appraisal, and returns and document reviews appear in its `history`.
+
+## Desk scoring and the shortlist
+
+Annex 2B and the shortlist for physical due diligence (Operations Manual 4.1, stage 2):
+
+- **Score.** An eligible appraisal is scored as soon as it is decided eligible, or with `scoreAppraisals`. Each
+  score component gets a `SCORE` item whose system points come from the application's score input
+  (`json_ext.score_inputs`) through enrolment's scoring rules (`component_points`), so appraisal and enrolment
+  score alike. A missing or unreadable input gives the component no points and its basis says why; the total stays
+  empty until an officer sets them, so nobody is ranked on a value no one has looked at.
+- **Total.** Each component's points are weighed by `weight / maximum points` and the sum is scaled to
+  `normalise_to` (as enrolment's weighted score). With weights equal to the maximum points it is the plain sum.
+- **Officer value.** `answerAppraisalScore` records a component's value as the evidence shows it (e.g. `30` months
+  or `stable`), with the evidence checked; its points follow from the component's scoring rules, so they never depart
+  from the rubric, and the total follows. Only while the appraisal is `SCORED`. The value is kept in the item's
+  `json_ext.officer_value` (`officerValue`) and its points in `officer_points`.
+- **Refresh.** A new application or document rescores a scored appraisal. An officer's value stays, and a component
+  whose basis changed under it is flagged `basis_changed`; unchanged rescoring writes nothing.
+- **Shortlist.** `shortlistAppraisals` scores any appraisal still `ELIGIBLE`, then ranks the round's scored
+  appraisals by score (highest first), submission time, then Kobo id, and fills the round's `places` with
+  enrolment's selector (`allocate_places`): each `selection_strategy` quota in order takes its best-ranked members,
+  then, with `spillover`, the places left go to the next ranked. The rest are `NOT_SHORTLISTED`.
+  - The rules are the round's, read from the current configuration: it refuses when the programme no longer
+    configures that round (`appraisal.round_not_configured`) or has no shortlist.
+  - Each appraisal belongs to the first quota it matches (`json_ext.shortlist_group`, e.g. `zomba`), or to the
+    other places (none); `rank` is its position there.
+  - It refuses while a score is missing or its basis changed unreviewed.
+  - Each appraisal keeps the run (who, when, and per group the places, ranked and shortlisted) in
+    `json_ext.shortlist`, which the shortlist screen shows. With `shortlist.individual_field` set, the outcome is
+    also written to that field of the individual's `json_ext`, through the individual service, for field validation
+    and enrolment to select from.
+  - Running it again recomputes, until the round is closed.
+- **Close.** `closeShortlist` makes the round's outcome final: its `SHORTLISTED` and `NOT_SHORTLISTED` appraisals move
+  to stage `CLOSED` and the shortlist can't be run again for the round. It refuses while scored appraisals aren't
+  ranked yet. Later applications are still screened and scored.
+- A programme without score components stops at eligibility.
+
+## Approval and reports
+
+**Supervisor approval** (Operations Manual 8.12), when the programme sets `approval`:
+
+- `shortlistAppraisals` ranks the round as usual but keeps the shortlist in an `AppraisalApproval` and opens a task
+  in tasks_management (source `appraisal`, business event `appraisal_shortlist`) instead of changing the
+  appraisals. A decision (`decideAppraisalEligibility`) is held the same way (`appraisal_eligibility`), and the
+  appraisal's checklist can't be answered or decided while it waits.
+- The task is approved or rejected in the Tasks screen by the task group handling source `appraisal`, under its
+  completion policy. It is a shared task (`benefit_plan_is_shared`): appraisals belong to no benefit plan, so
+  plan-restricted approvers still see it. With a tasks_management that has no shared tasks, it is a plain task.
+- Approving needs `gql_mutation_approve_appraisal_perms`, and the approver can't be the officer who asked
+  (`appraisal.own_change`). Both are checked before the task completes, so a refused approval leaves the task open
+  for someone who may approve it. The officer who asked may still reject it, to withdraw the change.
+- A decision waiting for approval can't be returned for action (`appraisal.approval_pending`); approve or reject it
+  first. The task names the applicant and the decision, not the national ID.
+- On approval the change is checked against the appraisals as they are now: the round must rank exactly as
+  proposed, the checklist must still lead to the same decision with the same answers. It is then applied, the log
+  naming who asked and who approved. Otherwise, or when rejected, nothing changes: the approval ends `FAILED` (with
+  the reason, e.g. `appraisal.shortlist_changed`) or `REJECTED`, and the officer runs it again.
+- One shortlist per round and one decision per appraisal wait at a time (`appraisal.approval_pending`).
+
+**Report** (`appraisalReport`), over the appraisals the user may see, for a programme's round (its latest by
+default): totals by status and stage; by shortlist quota (e.g. city, the first quota of the round's current
+`selection_strategy` each applicant matches; `city` holds the quota key) with places, eligible, ineligible,
+clarifications, scored and shortlisted; by each configured breakdown; the document check of the appraisals still
+being screened (incomplete, outstanding, to review, rejected); and what awaits action: not started, documents to
+review or missing, clarifications, answers changed, returned, and approvals pending.
+
+## GraphQL API
+
+```graphql
+query {
+  appraisal(programme: "UMEP", status: DESK_SCREENING, search: "banda",
+            answers: ["primary_sector=energy"], first: 20, orderBy: ["-date_updated"]) {
+    totalCount
+    edges { node {
+      uuid programme round stage status eligibility score rank koboId submissionId
+      individual { uuid firstName lastName }
+      items(kind: "ELIGIBILITY") {
+        uuid key label systemResult basis basisChanged officerResult evidence comment decidedBy decidedAt
+        result isOverridden
+      }
+      history { date user subject changes }
+    } }
+  }
+}
+```
+
+- Filters: `programme`, `round`, `stage`, `status` (also `stage_In`, `status_In`), `eligibility` (the last three are enums, written unquoted), `individual_Id`, and `id` (the appraisal's UUID); `search` (name
+  or national ID); `answers` (`key=value` on the applicant's answers, matched as text, and as a number when the
+  value is one); `parentLocation` + `parentLocationLevel` (individual's location rule); `needsReview` (an item's
+  basis changed). Needs `gql_query_appraisal_perms` and individual's `gql_individual_search_perms` (159001), since
+  an appraisal shows the applicant's registry record and answers; a user sees the appraisals of the individuals
+  in their locations.
+- What the user may do now, worked out by the same code as the mutations so the page never repeats the rules:
+  `canScreen` (answer the checklist), `canDecide` (record the decision), `canReopen`, and `decisionPreview`
+  (`decision` the checklist leads to, the `ineligible`, `pending`, `unanswered` and `changed` keys, and `problem`,
+  the refusal that stops the decision now).
+  For scoring, `canScore` (correct a value now), `canRescore`, and `shortlistGroup`, the quota the last shortlist
+  ranked the appraisal in. `canReviewDocuments`, `canReturn` and `canResubmit` follow the document and return rules, and `decisionPreview.problem`
+  includes an incomplete document check. `appraisalRounds` lists the configured rounds and the rounds with appraisals the user
+  may see (`programme`, `round`, `configured`, `appraisals`), for choosing a round.
+- `items` come in the order of the appraisal's rules, with each rule's `label`; `result` and `points` are the
+  values that count; score items also give `maxPoints`. `documents` is the document check (`documentsComplete`),
+  `returns` the returns for action. `history` lists the changes to the appraisal and its
+  items (field, old, new), newest first.
+- `pendingApproval` and `approvals` give the appraisal's eligibility decisions held for approval;
+  `appraisalApprovals(programme, round, kind)` lists a round's approvals (the shortlist's among them), newest
+  first; `appraisalReport(programme, round)` is the report above. Both need `gql_query_appraisal_perms`.
+- The application's answers and documents are read with msr_etl's `koboApplications(individualId)` and
+  `applicantDocuments(individualId)`, under msr_etl's own rights.
+
+| Mutation | Input | Right |
+| --- | --- | --- |
+| `answerAppraisalItem` | `id` (item), `result` (`YES`/`NO`/`PENDING`), `evidence`, `comment` | `gql_mutation_screen_appraisal_perms` |
+| `decideAppraisalEligibility` | `id` (appraisal), `comment` | `gql_mutation_screen_appraisal_perms` |
+| `scoreAppraisals` | `programme`, `round`, `ids` (optional) | `gql_mutation_score_appraisal_perms` |
+| `answerAppraisalScore` | `id` (score item), `value`, `evidence`, `comment` | `gql_mutation_score_appraisal_perms` |
+| `shortlistAppraisals` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
+| `reviewApplicantDocument` | `appraisalId`, `documentId`, `status` (`VERIFIED`/`REJECTED`), `comment` | `gql_mutation_review_document_perms` |
+| `returnAppraisal` | `id`, `reason`, `actionRequired` | `gql_mutation_return_appraisal_perms` |
+| `resubmitAppraisal` | `id`, `note` | `gql_mutation_return_appraisal_perms` |
+| `closeShortlist` | `programme`, `round` | `gql_mutation_shortlist_appraisal_perms` |
+| `reopenAppraisal` | `id` (appraisal), `reason` | `gql_mutation_return_appraisal_perms` |
+
+Mutations are logged and run like every openIMIS mutation (`mutationLogs` by `clientMutationId`); a refused one
+reports why, e.g. `appraisal.evidence_required` or `appraisal.answers_changed`.
+
+## Rights
+
+| Right | Code | Config key |
+| --- | --- | --- |
+| View appraisals (with individual search, 159001) | 220001 | `gql_query_appraisal_perms` |
+| Screen (record checks, decide eligibility) | 220002 | `gql_mutation_screen_appraisal_perms` |
+| Score | 220003 | `gql_mutation_score_appraisal_perms` |
+| Shortlist | 220004 | `gql_mutation_shortlist_appraisal_perms` |
+| Review documents | 220005 | `gql_mutation_review_document_perms` |
+| Return for action, reopen a decision | 220006 | `gql_mutation_return_appraisal_perms` |
+| Approve (a supervisor approving a held shortlist or decision in Tasks) | 220007 | `gql_mutation_approve_appraisal_perms` |
+
+The 220000 block is reserved for this module; a test fails if another installed module defaults to one of
+these codes. Rights are given to roles in the usual openIMIS role administration.
+
+## Testing
+
+From `openimis-be_py/openIMIS`: `python manage.py test appraisal --keepdb`.

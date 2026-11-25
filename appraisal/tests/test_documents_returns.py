@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from appraisal import documents, returns, review
 from appraisal.apps import AppraisalConfig
@@ -275,3 +275,17 @@ class DocumentsReturnsApiTest(openIMISGraphQLTestCase):
         resubmission = json.loads(next(e["changes"] for e in node["history"] if e["subject"] == "return"
                                        and "resubmitted_at" in e["changes"]))
         self.assertIn("resubmission_note", [change["field"] for change in resubmission])
+
+
+class LockingRunsInATransactionTest(SimpleTestCase):
+    """Functions that lock an appraisal row must open their own transaction: called from a mutation, outside one,
+    select_for_update fails. Tests run inside a transaction, so only this check catches a lost decorator."""
+
+    def test_each_locking_change_is_atomic(self):
+        from appraisal import scoring
+
+        for function in (documents.review_document, returns.return_appraisal, returns.resubmit_appraisal,
+                         review.answer_item, review.decide_eligibility, review.reopen_screening,
+                         scoring.score_round, scoring.answer_score, scoring.shortlist_round, scoring.close_shortlist):
+            with self.subTest(function=function.__name__):
+                self.assertTrue(hasattr(function, "__wrapped__"), f"{function.__name__} isn't @transaction.atomic")

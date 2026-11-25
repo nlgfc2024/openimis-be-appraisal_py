@@ -89,7 +89,6 @@ def documents_problems(appraisal):
             if entry["status"] == Status.REJECTED or (entry["required"] and entry["status"] != Status.VERIFIED)]
 
 
-@transaction.atomic
 def review_problem(appraisal):
     """Why the appraisal's documents can't be reviewed now, or None (the rule review_document applies)."""
     if appraisal.status not in OPEN_STATUSES:
@@ -97,6 +96,7 @@ def review_problem(appraisal):
     return None
 
 
+@transaction.atomic
 def review_document(user, appraisal_id, document_id, status, comment=""):
     """Record an officer's VERIFIED or REJECTED for one document of the appraised application; returns the review."""
     appraisal = Appraisal.get_queryset(Appraisal.objects.filter(id=appraisal_id, is_deleted=False), user) \
